@@ -1,0 +1,149 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* surfaces */
+    --background: 0 0% 100%;
+    --canvas: 240 6% 97%;
+    --foreground: 240 10% 4%;
+    --card: 0 0% 100%;
+    --card-foreground: 240 10% 4%;
+
+    /* neutrals */
+    --muted: 240 5% 96%;
+    --muted-foreground: 240 4% 46%;
+    --subtle: 240 5% 98%;
+    --subtle-foreground: 240 5% 30%;
+
+    /* borders & focus */
+    --border: 240 6% 92%;
+    --border-strong: 240 6% 86%;
+    --input: 240 6% 92%;
+    --ring: 235 85% 50%;
+
+    /* brand — 50% lightness dá contraste 4.9:1 contra branco (WCAG AA) */
+    --primary: 235 85% 50%;
+    --primary-foreground: 0 0% 100%;
+    --primary-soft: 235 90% 97%;
+    --primary-soft-foreground: 235 65% 40%;
+
+    /* semantic */
+    --success: 142 71% 36%;
+    --success-soft: 142 60% 94%;
+    --warning: 32 95% 44%;
+    --warning-soft: 38 95% 94%;
+    --destructive: 0 72% 51%;
+    --destructive-soft: 0 85% 96%;
+    --destructive-foreground: 0 0% 100%;
+    --info: 217 91% 55%;
+    --info-soft: 217 95% 96%;
+
+    --accent: 240 5% 96%;
+    --accent-foreground: 240 10% 4%;
+    --secondary: 240 5% 96%;
+    --secondary-foreground: 240 10% 4%;
+
+    --radius: 0.625rem;
+
+    --overlay: 0 0% 0%;
+    --overlay-opacity: 0.4;
+  }
+
+  .dark {
+    /* surfaces */
+    --background: 240 6% 10%;
+    --canvas: 240 7% 6%;
+    --foreground: 0 0% 98%;
+    --card: 240 6% 10%;
+    --card-foreground: 0 0% 98%;
+
+    /* neutrals */
+    --muted: 240 5% 16%;
+    --muted-foreground: 240 5% 65%;
+    --subtle: 240 5% 13%;
+    --subtle-foreground: 240 5% 82%;
+
+    /* borders & focus */
+    --border: 240 5% 18%;
+    --border-strong: 240 5% 28%;
+    --input: 240 5% 18%;
+    --ring: 235 85% 65%;
+
+    /* brand */
+    --primary: 235 85% 65%;
+    --primary-foreground: 240 10% 4%;
+    --primary-soft: 235 50% 18%;
+    --primary-soft-foreground: 235 85% 82%;
+
+    /* semantic */
+    --success: 142 71% 50%;
+    --success-soft: 142 40% 16%;
+    --warning: 32 95% 60%;
+    --warning-soft: 32 60% 16%;
+    --destructive: 0 72% 58%;
+    --destructive-soft: 0 50% 20%;
+    --destructive-foreground: 0 0% 98%;
+    --info: 217 91% 62%;
+    --info-soft: 217 40% 20%;
+
+    --accent: 240 5% 16%;
+    --accent-foreground: 0 0% 98%;
+    --secondary: 240 5% 16%;
+    --secondary-foreground: 0 0% 98%;
+
+    --overlay: 240 10% 0%;
+    --overlay-opacity: 0.65;
+
+    color-scheme: dark;
+  }
+
+  * {
+    border-color: hsl(var(--border));
+  }
+
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+
+  body {
+    font-family: 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+    font-feature-settings: 'cv11', 'ss01', 'ss02';
+    background-color: hsl(var(--canvas));
+    color: hsl(var(--foreground));
+    margin: 0;
+  }
+
+  #root {
+    width: 100%;
+    min-height: 100vh;
+  }
+
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb {
+    background: hsl(var(--border-strong));
+    border: 2px solid hsl(var(--canvas));
+    border-radius: 8px;
+  }
+  ::-webkit-scrollbar-thumb:hover { background: hsl(var(--muted-foreground)); }
+
+  /* smooth theme transitions */
+  html.theme-transition,
+  html.theme-transition *,
+  html.theme-transition *::before,
+  html.theme-transition *::after {
+    transition: background-color 0.2s ease, color 0.2s ease, border-color 0.2s ease !important;
+    transition-delay: 0 !important;
+  }
+}
