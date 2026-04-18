@@ -85,7 +85,7 @@ export function LeadCreateDialog({ onClose, onCreated }: Props) {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-foreground/40 backdrop-blur-sm animate-fade-in"
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 dark:bg-black/70 backdrop-blur-sm animate-fade-in"
       onClick={onClose}
     >
       <div
@@ -102,13 +102,9 @@ export function LeadCreateDialog({ onClose, onCreated }: Props) {
               <p className="text-xs text-muted-foreground">Cadastre manualmente um lead no funil</p>
             </div>
           </div>
-          <button
-            onClick={onClose}
-            className="h-8 w-8 rounded-lg hover:bg-subtle text-muted-foreground hover:text-foreground flex items-center justify-center transition-colors"
-            title="Fechar"
-          >
+          <Button variant="ghost" size="icon" onClick={onClose} aria-label="Fechar">
             <X size={15} />
-          </button>
+          </Button>
         </div>
 
         <div className="p-5 space-y-3 max-h-[70vh] overflow-y-auto">

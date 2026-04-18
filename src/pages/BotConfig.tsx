@@ -545,12 +545,12 @@ function BotMetricsCard() {
           <AreaChart data={metrics.daily} margin={{ top: 5, right: 10, bottom: 0, left: -20 }}>
             <defs>
               <linearGradient id="gradIn" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="5%" stopColor="hsl(217 91% 55%)" stopOpacity={0.3} />
-                <stop offset="95%" stopColor="hsl(217 91% 55%)" stopOpacity={0} />
+                <stop offset="5%" stopColor="hsl(var(--info))" stopOpacity={0.3} />
+                <stop offset="95%" stopColor="hsl(var(--info))" stopOpacity={0} />
               </linearGradient>
               <linearGradient id="gradOut" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="5%" stopColor="hsl(235 85% 60%)" stopOpacity={0.3} />
-                <stop offset="95%" stopColor="hsl(235 85% 60%)" stopOpacity={0} />
+                <stop offset="5%" stopColor="hsl(var(--primary))" stopOpacity={0.3} />
+                <stop offset="95%" stopColor="hsl(var(--primary))" stopOpacity={0} />
               </linearGradient>
             </defs>
             <XAxis
@@ -586,8 +586,8 @@ function BotMetricsCard() {
               wrapperStyle={{ fontSize: 11 }}
               formatter={(v: string) => v === 'msgsIn' ? 'Recebidas' : 'Enviadas'}
             />
-            <Area type="monotone" dataKey="msgsIn" stroke="hsl(217 91% 55%)" strokeWidth={2} fill="url(#gradIn)" />
-            <Area type="monotone" dataKey="msgsOut" stroke="hsl(235 85% 60%)" strokeWidth={2} fill="url(#gradOut)" />
+            <Area type="monotone" dataKey="msgsIn" stroke="hsl(var(--info))" strokeWidth={2} fill="url(#gradIn)" />
+            <Area type="monotone" dataKey="msgsOut" stroke="hsl(var(--primary))" strokeWidth={2} fill="url(#gradOut)" />
           </AreaChart>
         </ResponsiveContainer>
       </div>

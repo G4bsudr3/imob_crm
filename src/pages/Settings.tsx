@@ -16,6 +16,21 @@ import { useConfirm } from '../components/ui/ConfirmDialog'
 import { supabase } from '../lib/supabase'
 import { cn, formatDate } from '../lib/utils'
 import { maskCNPJ, maskCEP, maskPhone, UFS } from '../lib/masks'
+import { Skeleton } from '../components/ui/Skeleton'
+
+function SkeletonTabContent({ rows = 3 }: { rows?: number }) {
+  return (
+    <Card className="p-6 space-y-4">
+      <Skeleton className="h-4 w-48" />
+      <Skeleton className="h-3 w-full" />
+      <div className="grid grid-cols-2 gap-3 pt-2">
+        {Array.from({ length: rows * 2 }).map((_, i) => (
+          <Skeleton key={i} className="h-9" />
+        ))}
+      </div>
+    </Card>
+  )
+}
 
 type Tab = 'pessoal' | 'empresa' | 'equipe' | 'integracoes'
 
@@ -154,7 +169,7 @@ function PersonalTab() {
     setTimeout(() => setSaved(false), 2000)
   }
 
-  if (loading) return <Card className="p-8 text-sm text-muted-foreground text-center">Carregando...</Card>
+  if (loading) return <SkeletonTabContent />
 
   const initials = (form.name || user?.email || '??').slice(0, 2).toUpperCase()
   const schemaMissing = error?.toLowerCase().includes('column') || error?.toLowerCase().includes('does not exist')
@@ -452,7 +467,7 @@ function CompanyTab() {
     setTimeout(() => setSaved(false), 2000)
   }
 
-  if (loading) return <Card className="p-8 text-sm text-muted-foreground text-center">Carregando...</Card>
+  if (loading) return <SkeletonTabContent />
 
   const schemaMissing = error?.toLowerCase().includes('organizations') || error?.toLowerCase().includes('does not exist')
 
@@ -701,7 +716,7 @@ function TeamTab() {
     else toast.success('Membro removido')
   }
 
-  if (loading) return <Card className="p-8 text-sm text-muted-foreground text-center">Carregando...</Card>
+  if (loading) return <SkeletonTabContent />
 
   return (
     <div className="space-y-4">

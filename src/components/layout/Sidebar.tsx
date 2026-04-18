@@ -1,5 +1,6 @@
-import { NavLink } from 'react-router-dom'
-import { LayoutDashboard, Users, Calendar, Home, MessageSquare, LogOut, Settings as SettingsIcon, X, Search } from 'lucide-react'
+import { NavLink, useNavigate } from 'react-router-dom'
+import { useEffect, useRef, useState } from 'react'
+import { LayoutDashboard, Users, Calendar, Home, MessageSquare, LogOut, Settings as SettingsIcon, X, Search, ChevronUp, UserCog } from 'lucide-react'
 import { cn } from '../../lib/utils'
 import { useAuth } from '../../hooks/useAuth'
 import { useProfile } from '../../hooks/useProfile'
@@ -110,36 +111,123 @@ export function Sidebar({ mobileOpen, onMobileClose }: SidebarProps) {
           <NavGroup label="Configuração" items={configNav} onNavigate={onMobileClose} />
         </nav>
 
-        <div className="px-3 py-3 border-t border-border space-y-2">
-          <div className="flex items-center justify-between px-2">
-            <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">Tema</span>
-            <ThemeToggle />
-          </div>
-          <div className="group flex items-center gap-2.5 px-2 py-1.5 rounded-md hover:bg-subtle/60 transition-colors">
-            <div className="h-7 w-7 rounded-full bg-primary-soft text-primary-soft-foreground flex items-center justify-center text-[11px] font-semibold shrink-0">
-              {initials}
-            </div>
-            <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-1.5">
-                <p className="text-xs font-medium truncate">{displayName}</p>
-                <span className="text-[9px] font-medium uppercase tracking-wider px-1.5 py-0.5 rounded bg-subtle text-muted-foreground border border-border shrink-0">
-                  {roleLabel}
-                </span>
-              </div>
-              <p className="text-[10px] text-muted-foreground truncate">{email || 'Sem sessão'}</p>
-            </div>
-            <button
-              onClick={() => signOut()}
-              title="Sair"
-              aria-label="Sair da conta"
-              className="opacity-60 group-hover:opacity-100 text-muted-foreground hover:text-destructive transition-all shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 rounded"
-            >
-              <LogOut size={14} aria-hidden="true" />
-            </button>
-          </div>
+        <div className="px-3 py-3 border-t border-border">
+          <UserMenu
+            initials={initials}
+            displayName={displayName}
+            email={email}
+            roleLabel={roleLabel}
+            onSignOut={signOut}
+            onNavigate={onMobileClose}
+          />
         </div>
       </aside>
     </>
+  )
+}
+
+function UserMenu({
+  initials,
+  displayName,
+  email,
+  roleLabel,
+  onSignOut,
+  onNavigate,
+}: {
+  initials: string
+  displayName: string
+  email: string
+  roleLabel: string
+  onSignOut: () => void
+  onNavigate: () => void
+}) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+  const navigate = useNavigate()
+
+  useEffect(() => {
+    function onDocClick(e: MouseEvent) {
+      if (!ref.current) return
+      if (!ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') setOpen(false)
+    }
+    if (open) {
+      document.addEventListener('mousedown', onDocClick)
+      document.addEventListener('keydown', onKey)
+      return () => {
+        document.removeEventListener('mousedown', onDocClick)
+        document.removeEventListener('keydown', onKey)
+      }
+    }
+  }, [open])
+
+  function goProfile() {
+    setOpen(false)
+    onNavigate()
+    navigate('/settings')
+  }
+
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        onClick={() => setOpen((v) => !v)}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        className={cn(
+          'w-full flex items-center gap-2.5 px-2 py-1.5 rounded-md transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40',
+          open ? 'bg-subtle' : 'hover:bg-subtle/60',
+        )}
+      >
+        <div className="h-7 w-7 rounded-full bg-primary-soft text-primary-soft-foreground flex items-center justify-center text-[11px] font-semibold shrink-0">
+          {initials}
+        </div>
+        <div className="min-w-0 flex-1 text-left">
+          <div className="flex items-center gap-1.5">
+            <p className="text-xs font-medium truncate">{displayName}</p>
+            <span className="text-[9px] font-medium uppercase tracking-wider px-1.5 py-0.5 rounded bg-subtle text-muted-foreground border border-border shrink-0">
+              {roleLabel}
+            </span>
+          </div>
+          <p className="text-[10px] text-muted-foreground truncate">{email || 'Sem sessão'}</p>
+        </div>
+        <ChevronUp
+          size={13}
+          className={cn('shrink-0 text-muted-foreground transition-transform', open ? '' : 'rotate-180')}
+          aria-hidden="true"
+        />
+      </button>
+
+      {open && (
+        <div
+          role="menu"
+          className="absolute bottom-[calc(100%+6px)] left-0 right-0 bg-card border border-border rounded-lg shadow-float py-1.5 animate-fade-in z-50"
+        >
+          <button
+            onClick={goProfile}
+            className="w-full flex items-center gap-2.5 px-3 py-1.5 text-sm text-foreground hover:bg-subtle transition-colors"
+            role="menuitem"
+          >
+            <UserCog size={13} className="text-muted-foreground" />
+            Meu perfil
+          </button>
+          <div className="px-3 py-2 flex items-center justify-between gap-3">
+            <span className="text-[11px] font-medium text-muted-foreground">Tema</span>
+            <ThemeToggle />
+          </div>
+          <div className="border-t border-border my-1" />
+          <button
+            onClick={() => { setOpen(false); onSignOut() }}
+            className="w-full flex items-center gap-2.5 px-3 py-1.5 text-sm text-destructive hover:bg-destructive-soft transition-colors"
+            role="menuitem"
+          >
+            <LogOut size={13} />
+            Sair
+          </button>
+        </div>
+      )}
+    </div>
   )
 }
 

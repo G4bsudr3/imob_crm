@@ -185,15 +185,44 @@ function formToInput(form: FormState): PropertyInput {
 }
 
 // ---------- Section wrapper ----------
-function Section({ title, description, children }: { title: string; description?: string; children: React.ReactNode }) {
+function Section({ id, title, description, children }: { id?: string; title: string; description?: string; children: React.ReactNode }) {
   return (
-    <Card className="overflow-hidden">
+    <Card id={id} className="overflow-hidden scroll-mt-24">
       <div className="px-5 pt-5 pb-3 border-b border-border">
         <p className="text-sm font-semibold tracking-tight">{title}</p>
         {description && <p className="text-xs text-muted-foreground mt-0.5">{description}</p>}
       </div>
       <div className="p-5 space-y-4">{children}</div>
     </Card>
+  )
+}
+
+const PROPERTY_FORM_SECTIONS: { id: string; label: string }[] = [
+  { id: 'sec-basico', label: 'Básico' },
+  { id: 'sec-valores', label: 'Valores' },
+  { id: 'sec-endereco', label: 'Endereço' },
+  { id: 'sec-specs', label: 'Specs' },
+  { id: 'sec-amenidades', label: 'Amenidades' },
+  { id: 'sec-midia', label: 'Mídia' },
+  { id: 'sec-notas', label: 'Notas' },
+]
+
+function PropertyFormNav() {
+  return (
+    <div className="sticky top-0 z-20 -mx-4 sm:mx-0 px-4 sm:px-0 pt-1 pb-2 bg-canvas/95 backdrop-blur">
+      <div className="flex gap-1.5 overflow-x-auto scrollbar-thin">
+        {PROPERTY_FORM_SECTIONS.map((s, i) => (
+          <a
+            key={s.id}
+            href={`#${s.id}`}
+            className="shrink-0 flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full bg-subtle/60 hover:bg-subtle text-muted-foreground hover:text-foreground border border-border transition-colors"
+          >
+            <span className="tabular text-[10px] text-muted-foreground">{i + 1}</span>
+            {s.label}
+          </a>
+        ))}
+      </div>
+    </div>
   )
 }
 
@@ -354,8 +383,10 @@ export function Imoveis() {
             <Button variant="ghost" size="icon" onClick={cancel}><X size={14} /></Button>
           </div>
 
+          <PropertyFormNav />
+
           {/* -------- 1. Básico -------- */}
-          <Section title="Informações básicas">
+          <Section id="sec-basico" title="Informações básicas">
             <Field label="Título *" hint="Aparece como headline no anúncio">
               <Input
                 value={form.title}
@@ -399,7 +430,7 @@ export function Imoveis() {
           </Section>
 
           {/* -------- 2. Valores -------- */}
-          <Section title="Valores e condições" description="Informe apenas os valores pertinentes à finalidade escolhida">
+          <Section id="sec-valores" title="Valores e condições" description="Informe apenas os valores pertinentes à finalidade escolhida">
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               {salesIncluded && (
                 <Field label="Preço de venda (R$)">
@@ -435,7 +466,7 @@ export function Imoveis() {
           </Section>
 
           {/* -------- 3. Endereço -------- */}
-          <Section title="Endereço" description="Preencha o CEP para buscar automaticamente">
+          <Section id="sec-endereco" title="Endereço" description="Preencha o CEP para buscar automaticamente">
             <div className="grid grid-cols-1 sm:grid-cols-6 gap-4">
               <Field label="CEP" className="sm:col-span-2">
                 <Input
@@ -473,7 +504,7 @@ export function Imoveis() {
           </Section>
 
           {/* -------- 4. Especificações -------- */}
-          <Section title="Especificações" description="Medidas e características físicas do imóvel">
+          <Section id="sec-specs" title="Especificações" description="Medidas e características físicas do imóvel">
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
               <Field label="Área útil (m²)">
                 <Input type="number" value={form.area_m2} onChange={(e) => setForm((f) => ({ ...f, area_m2: e.target.value }))} placeholder="72" />
@@ -509,7 +540,7 @@ export function Imoveis() {
           </Section>
 
           {/* -------- 5. Amenities -------- */}
-          <Section title="Características e amenidades" description="Marque tudo que o imóvel ou condomínio oferece">
+          <Section id="sec-amenidades" title="Características e amenidades" description="Marque tudo que o imóvel ou condomínio oferece">
             <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2.5">
               {AMENITIES.map((a) => (
                 <Checkbox
@@ -523,7 +554,7 @@ export function Imoveis() {
           </Section>
 
           {/* -------- 6. Mídia -------- */}
-          <Section title="Mídia e links" description="Anúncio externo, imagens, vídeo e tour virtual">
+          <Section id="sec-midia" title="Mídia e links" description="Anúncio externo, imagens, vídeo e tour virtual">
             <Field label="URL do anúncio" hint="Link para o anúncio em outro site (seu, VivaReal, Zap, Imovelweb, etc.)">
               <Input type="url" value={form.listing_url}
                 onChange={(e) => setForm((f) => ({ ...f, listing_url: e.target.value }))}
@@ -549,7 +580,7 @@ export function Imoveis() {
           </Section>
 
           {/* -------- 7. Interno -------- */}
-          <Section title="Anotações internas" description="Visíveis apenas para a equipe — nunca exibidas ao cliente">
+          <Section id="sec-notas" title="Anotações internas" description="Visíveis apenas para a equipe — nunca exibidas ao cliente">
             <Field label="Notas privadas">
               <Textarea rows={3} value={form.internal_notes}
                 onChange={(e) => setForm((f) => ({ ...f, internal_notes: e.target.value }))}
@@ -660,7 +691,7 @@ function PropertyCard({
         </div>
 
         <div>
-          <p className="font-semibold text-foreground text-sm leading-tight line-clamp-2">{p.title}</p>
+          <p className="font-semibold text-foreground text-base leading-tight line-clamp-2">{p.title}</p>
           {p.ref_code && (
             <p className="text-[10px] text-muted-foreground font-mono mt-1">{p.ref_code}</p>
           )}
@@ -674,7 +705,7 @@ function PropertyCard({
       </div>
 
       <div className="px-4 pb-4 space-y-3 flex-1">
-        <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
+        <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground bg-subtle/40 rounded-lg px-3 py-2">
           {p.bedrooms != null && <span className="flex items-center gap-1 tabular"><BedDouble size={11} />{p.bedrooms}{p.suites != null && p.suites > 0 ? ` (${p.suites} suíte${p.suites > 1 ? 's' : ''})` : ''}</span>}
           {p.bathrooms != null && <span className="flex items-center gap-1 tabular"><Bath size={11} />{p.bathrooms}</span>}
           {p.parking_spots != null && <span className="flex items-center gap-1 tabular"><Car size={11} />{p.parking_spots}</span>}
@@ -685,14 +716,14 @@ function PropertyCard({
 
         {amenityLabels.length > 0 && (
           <div className="flex flex-wrap gap-1">
-            {amenityLabels.slice(0, 4).map((l) => (
+            {amenityLabels.slice(0, 3).map((l) => (
               <span key={l} className="text-[10px] px-1.5 py-0.5 rounded bg-subtle text-subtle-foreground border border-border">
                 {l}
               </span>
             ))}
-            {amenityLabels.length > 4 && (
-              <span className="text-[10px] px-1.5 py-0.5 rounded text-muted-foreground">
-                +{amenityLabels.length - 4}
+            {amenityLabels.length > 3 && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded text-muted-foreground" title={amenityLabels.slice(3).join(', ')}>
+                +{amenityLabels.length - 3}
               </span>
             )}
           </div>

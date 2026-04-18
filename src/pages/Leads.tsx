@@ -306,7 +306,7 @@ export function Leads() {
               </thead>
               <tbody className="divide-y divide-border">
                 {filtered.map((lead) => (
-                  <tr key={lead.id} className="hover:bg-subtle/40 transition-colors group">
+                  <tr key={lead.id} className="hover:bg-subtle/80 border-l-2 border-l-transparent hover:border-l-primary transition-colors group">
                     <td className="px-5 py-3">
                       <div className="flex items-center gap-3">
                         <div className="h-8 w-8 rounded-full bg-primary-soft text-primary-soft-foreground flex items-center justify-center text-xs font-semibold shrink-0">

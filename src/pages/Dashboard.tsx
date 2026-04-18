@@ -22,7 +22,13 @@ import {
   cn,
 } from '../lib/utils'
 
-const PIE_COLORS = ['hsl(235 85% 60%)', 'hsl(32 95% 44%)', 'hsl(217 91% 55%)', 'hsl(0 72% 51%)', 'hsl(142 71% 36%)']
+const PIE_COLORS = [
+  'hsl(var(--primary))',
+  'hsl(var(--warning))',
+  'hsl(var(--info))',
+  'hsl(var(--destructive))',
+  'hsl(var(--success))',
+]
 
 function greeting(name: string | null | undefined): string {
   const h = new Date().getHours()
