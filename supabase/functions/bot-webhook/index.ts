@@ -1,131 +1,203 @@
-// Supabase Edge Function: bot-webhook
-// Recebe eventos do Evolution API. Responde via AI (AWS Bedrock / Claude Haiku)
-// usando contexto da org + imóveis disponíveis. Captura dados do lead via tool use.
-//
-// POST /functions/v1/bot-webhook
-// Evolution envia todos os eventos configurados (MESSAGES_UPSERT, CONNECTION_UPDATE)
-// ---------------------------------------------------------------------
-
 import { createClient, SupabaseClient } from 'jsr:@supabase/supabase-js@2'
 import { BedrockRuntimeClient, InvokeModelCommand } from 'npm:@aws-sdk/client-bedrock-runtime@3.709.0'
 
-const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, content-type, apikey',
-  'Access-Control-Allow-Methods': 'POST, OPTIONS',
+const corsHeaders = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'authorization, content-type, apikey', 'Access-Control-Allow-Methods': 'POST, OPTIONS' }
+const ok = (body: unknown = { ok: true }) => new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json', ...corsHeaders } })
+
+function unaccent(s: string): string { return s.normalize('NFD').replace(/[\u0300-\u036f]/g, '') }
+
+type EvolutionMessage = { event: string; instance?: string; data?: { key?: { remoteJid?: string; fromMe?: boolean; id?: string }; pushName?: string; message?: { conversation?: string; extendedTextMessage?: { text?: string }; audioMessage?: any; imageMessage?: { url?: string; mimetype?: string; caption?: string }; videoMessage?: { caption?: string } }; messageType?: string } }
+type Lead = { id: string; organization_id: string; name: string | null; phone: string; email: string | null; name_confirmed: boolean; bot_paused: boolean; bot_paused_reason: string | null; status: string; property_type: string | null; location_interest: string | null; budget_min: number | null; budget_max: number | null; bedrooms_needed: number | null; profile_notes: string | null }
+type Organization = { legal_name: string | null; trade_name: string | null; website: string | null; email: string | null; phone: string | null; address_city: string | null; address_state: string | null }
+type BotConfig = { is_active: boolean; persona: string | null; welcome_message: string; triagem_localizacao: string; triagem_tipo: string; triagem_orcamento: string; triagem_quartos: string; mensagem_agendamento: string; farewell_message: string; no_properties_message: string; business_hours_enabled: boolean; business_hours_start: string; business_hours_end: string; outside_hours_message: string; max_properties_shown: number; can_schedule: boolean; can_escalate: boolean; can_negotiate_price: boolean; show_listing_links: boolean; communication_style: 'casual' | 'balanced' | 'formal'; company_differentials: string | null; service_areas: string | null }
+
+function parseBrtDate(input: string): Date | null {
+  const s = input.trim()
+  const m = s.match(/^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}(?::\d{2})?)(?:\.\d+)?(Z|[+-]\d{2}:?\d{2})?$/)
+  if (!m) { const d = new Date(s); return isNaN(d.getTime()) ? null : d }
+  const [, date, time] = m
+  return new Date(`${date}T${time}-03:00`)
 }
 
-const ok = (body: unknown = { ok: true }) =>
-  new Response(JSON.stringify(body), {
-    status: 200,
-    headers: { 'Content-Type': 'application/json', ...corsHeaders },
+function toBrtIso(d: Date): string {
+  const parts = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).formatToParts(d).reduce<Record<string, string>>((acc, p) => { if (p.type !== 'literal') acc[p.type] = p.value; return acc }, {})
+  const h = parts.hour === '24' ? '00' : parts.hour
+  return `${parts.year}-${parts.month}-${parts.day}T${h}:${parts.minute}:${parts.second}-03:00`
+}
+
+function fmtBrtShort(d: Date): string {
+  return d.toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
+}
+
+function isSuspiciousName(name: string | null | undefined): boolean {
+  if (!name) return true
+  const n = name.trim()
+  if (n.length < 2) return true
+  if (/\d/.test(n)) return true
+  if (/^[a-z]+$/.test(n)) return true
+  if (/[_@]/.test(n)) return true
+  return false
+}
+
+function isValidEmail(s: string): boolean {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s.trim())
+}
+
+// ========= Group notifications =========
+async function getGroupJid(admin: SupabaseClient, orgId: string, instanceName: string): Promise<string | null> {
+  const { data } = await admin.from('whatsapp_instances').select('group_jid').eq('organization_id', orgId).maybeSingle()
+  return data?.group_jid ?? null
+}
+
+async function sendGroupMessage(instanceName: string, groupJid: string, text: string): Promise<void> {
+  const evoUrl = Deno.env.get('EVOLUTION_API_URL')!
+  const evoKey = Deno.env.get('EVOLUTION_API_KEY')!
+  try {
+    const res = await fetch(`${evoUrl}/message/sendText/${instanceName}`, {
+      method: 'POST',
+      headers: { apikey: evoKey, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ number: groupJid, text }),
+    })
+    if (!res.ok) console.warn('[bot-webhook] group send failed:', await res.text())
+  } catch (e) { console.warn('[bot-webhook] group send threw:', e) }
+}
+
+async function notifyGroup(admin: SupabaseClient, orgId: string, instanceName: string, text: string): Promise<void> {
+  const jid = await getGroupJid(admin, orgId, instanceName)
+  if (!jid) return
+  await sendGroupMessage(instanceName, jid, text)
+}
+
+// ========= Google Calendar helpers =========
+type CalIntegration = { user_id: string; google_email: string | null; calendar_id: string; access_token: string | null; refresh_token: string; expires_at: string | null }
+
+async function getOrgCalIntegration(admin: SupabaseClient, orgId: string): Promise<CalIntegration | null> {
+  const { data } = await admin.rpc('get_org_calendar_integration', { p_org_id: orgId })
+  const row = Array.isArray(data) ? data[0] : data
+  if (!row) return null
+  return row as CalIntegration
+}
+
+async function refreshGoogleToken(admin: SupabaseClient, integ: CalIntegration): Promise<string | null> {
+  const clientId = Deno.env.get('GOOGLE_CLIENT_ID')
+  const clientSecret = Deno.env.get('GOOGLE_CLIENT_SECRET')
+  if (!clientId || !clientSecret) return null
+  if (integ.access_token && integ.expires_at && new Date(integ.expires_at).getTime() - Date.now() > 120_000) return integ.access_token
+  const res = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ client_id: clientId, client_secret: clientSecret, refresh_token: integ.refresh_token, grant_type: 'refresh_token' }),
   })
+  if (!res.ok) { await admin.from('calendar_integrations').update({ last_error: `refresh_failed` }).eq('user_id', integ.user_id).eq('provider', 'google'); return null }
+  const j = await res.json() as { access_token: string; expires_in: number }
+  const expiresAt = new Date(Date.now() + (j.expires_in - 60) * 1000).toISOString()
+  await admin.from('calendar_integrations').update({ access_token: j.access_token, expires_at: expiresAt, last_error: null }).eq('user_id', integ.user_id).eq('provider', 'google')
+  return j.access_token
+}
 
-// ---------- Types ----------
+async function isBusyOnGoogle(accessToken: string, calendarId: string, at: Date, windowMin = 30): Promise<boolean> {
+  const timeMin = new Date(at.getTime() - windowMin * 60_000).toISOString()
+  const timeMax = new Date(at.getTime() + windowMin * 60_000).toISOString()
+  const res = await fetch('https://www.googleapis.com/calendar/v3/freeBusy', {
+    method: 'POST', headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ timeMin, timeMax, timeZone: 'America/Sao_Paulo', items: [{ id: calendarId }] }),
+  })
+  if (!res.ok) return false
+  const j = await res.json() as { calendars: Record<string, { busy?: Array<{ start: string; end: string }> }> }
+  return !!(j.calendars?.[calendarId]?.busy && j.calendars[calendarId].busy!.length > 0)
+}
 
-type EvolutionMessage = {
-  event: string
-  instance?: string
-  data?: {
-    key?: { remoteJid?: string; fromMe?: boolean; id?: string }
-    pushName?: string
-    message?: {
-      conversation?: string
-      extendedTextMessage?: { text?: string }
-      audioMessage?: {
-        url?: string
-        mimetype?: string
-        seconds?: number
-        ptt?: boolean
-      }
-      imageMessage?: {
-        url?: string
-        mimetype?: string
-        caption?: string
-      }
-      videoMessage?: {
-        url?: string
-        mimetype?: string
-        caption?: string
-      }
-    }
-    messageType?: string
-    messageTimestamp?: number
+async function createGoogleEvent(accessToken: string, calendarId: string, input: { summary: string; description?: string; startAt: Date; endAt?: Date; location?: string; attendeeEmail?: string | null }): Promise<{ id: string; htmlLink?: string } | null> {
+  const end = input.endAt ?? new Date(input.startAt.getTime() + 60 * 60_000)
+  const body: Record<string, unknown> = { summary: input.summary, description: input.description ?? null, location: input.location ?? null, start: { dateTime: input.startAt.toISOString(), timeZone: 'America/Sao_Paulo' }, end: { dateTime: end.toISOString(), timeZone: 'America/Sao_Paulo' }, reminders: { useDefault: true } }
+  if (input.attendeeEmail) body.attendees = [{ email: input.attendeeEmail }]
+  const url = `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events${input.attendeeEmail ? '?sendUpdates=all' : ''}`
+  const res = await fetch(url, { method: 'POST', headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+  if (!res.ok) return null
+  return await res.json() as { id: string; htmlLink?: string }
+}
+
+async function addAttendeeToGoogleEvent(accessToken: string, calendarId: string, eventId: string, email: string): Promise<boolean> {
+  const getRes = await fetch(`https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events/${eventId}`, { headers: { Authorization: `Bearer ${accessToken}` } })
+  if (!getRes.ok) return false
+  const event = await getRes.json() as { attendees?: Array<{ email: string }> }
+  const attendees = event.attendees ?? []
+  if (attendees.some((a) => (a.email || '').toLowerCase() === email.toLowerCase())) return true
+  attendees.push({ email })
+  const patchRes = await fetch(`https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events/${eventId}?sendUpdates=all`, { method: 'PATCH', headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ attendees }) })
+  return patchRes.ok
+}
+
+async function patchGoogleEvent(accessToken: string, calendarId: string, eventId: string, patch: { startAt?: Date; endAt?: Date }): Promise<boolean> {
+  const body: any = {}
+  if (patch.startAt) body.start = { dateTime: patch.startAt.toISOString(), timeZone: 'America/Sao_Paulo' }
+  const end = patch.endAt ?? (patch.startAt ? new Date(patch.startAt.getTime() + 60 * 60_000) : null)
+  if (end) body.end = { dateTime: end.toISOString(), timeZone: 'America/Sao_Paulo' }
+  const res = await fetch(`https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events/${eventId}`, { method: 'PATCH', headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+  return res.ok
+}
+
+async function deleteGoogleEvent(accessToken: string, calendarId: string, eventId: string): Promise<boolean> {
+  const res = await fetch(`https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events/${eventId}`, { method: 'DELETE', headers: { Authorization: `Bearer ${accessToken}` } })
+  return res.ok || res.status === 410
+}
+
+// ========= Conflict + suggestion =========
+async function hasConflictingAppointment(admin: SupabaseClient, orgId: string, propertyId: string, at: Date, windowMin = 30, excludeApptId?: string): Promise<boolean> {
+  const from = new Date(at.getTime() - windowMin * 60_000).toISOString()
+  const to = new Date(at.getTime() + windowMin * 60_000).toISOString()
+  let q = admin.from('appointments').select('id', { count: 'exact', head: true }).eq('organization_id', orgId).eq('property_id', propertyId).in('status', ['agendado', 'confirmado']).gte('scheduled_at', from).lte('scheduled_at', to)
+  if (excludeApptId) q = q.neq('id', excludeApptId)
+  const { count, error } = await q
+  if (error) return false
+  return (count ?? 0) > 0
+}
+
+async function suggestAvailableSlots(admin: SupabaseClient, orgId: string, propertyId: string, wanted: Date, gcalToken: string | null, gcalCalId: string | null, maxSuggestions = 3, windowMin = 30): Promise<string[]> {
+  const suggestions: string[] = []
+  const now = Date.now()
+  const candidates: Date[] = []
+  function brtDate(baseDate: Date, hour: number, minute: number): Date {
+    const parts = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(baseDate).reduce<Record<string, string>>((acc, p) => { if (p.type !== 'literal') acc[p.type] = p.value; return acc }, {})
+    return new Date(`${parts.year}-${parts.month}-${parts.day}T${String(hour).padStart(2,'0')}:${String(minute).padStart(2,'0')}:00-03:00`)
   }
+  const wantedParts = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit', hour12: false }).formatToParts(wanted).reduce<Record<string, string>>((acc, p) => { if (p.type !== 'literal') acc[p.type] = p.value; return acc }, {})
+  let wantedH = parseInt(wantedParts.hour, 10); if (wantedH === 24) wantedH = 0
+  const wantedM = parseInt(wantedParts.minute, 10)
+  for (const delta of [30, 60, 90, 120, -60, -30, -90, -120, 180, 240]) {
+    const total = wantedH * 60 + wantedM + delta
+    if (total < 9*60 || total > 18*60) continue
+    const h = Math.floor(total/60), m = total%60
+    if (m !== 0 && m !== 30) continue
+    const c = brtDate(wanted, h, m)
+    if (c.getTime() > now) candidates.push(c)
+  }
+  for (let d = 1; d <= 3; d++) {
+    const dt = new Date(wanted.getTime() + d * 86_400_000)
+    for (const [h, m] of [[10,0],[11,0],[14,0],[15,0],[16,0],[17,0]]) {
+      const c = brtDate(dt, h, m); if (c.getTime() > now) candidates.push(c)
+    }
+  }
+  for (const c of candidates) {
+    if (suggestions.length >= maxSuggestions) break
+    if (await hasConflictingAppointment(admin, orgId, propertyId, c, windowMin)) continue
+    if (gcalToken && gcalCalId && await isBusyOnGoogle(gcalToken, gcalCalId, c, windowMin)) continue
+    suggestions.push(toBrtIso(c))
+  }
+  return suggestions
 }
 
-type Lead = {
-  id: string
-  organization_id: string
-  name: string | null
-  phone: string
-  status: string
-  property_type: string | null
-  location_interest: string | null
-  budget_min: number | null
-  budget_max: number | null
-  bedrooms_needed: number | null
-  profile_notes: string | null
-}
-
-type Organization = {
-  legal_name: string | null
-  trade_name: string | null
-  website: string | null
-  email: string | null
-  phone: string | null
-  address_city: string | null
-  address_state: string | null
-}
-
-type BotConfig = {
-  is_active: boolean
-  persona: string | null
-  welcome_message: string
-  triagem_localizacao: string
-  triagem_tipo: string
-  triagem_orcamento: string
-  triagem_quartos: string
-  mensagem_agendamento: string
-  farewell_message: string
-  no_properties_message: string
-  business_hours_enabled: boolean
-  business_hours_start: string
-  business_hours_end: string
-  outside_hours_message: string
-  max_properties_shown: number
-  // Toggles de comportamento
-  can_schedule: boolean
-  can_escalate: boolean
-  can_negotiate_price: boolean
-  show_listing_links: boolean
-  communication_style: 'casual' | 'balanced' | 'formal'
-  company_differentials: string | null
-  service_areas: string | null
-}
-
-// ---------- Main ----------
-
+// ========= Main =========
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders })
   if (req.method !== 'POST') return ok()
-
   let payload: EvolutionMessage
-  try {
-    payload = await req.json()
-  } catch {
-    return ok()
-  }
-
-  console.log('[bot-webhook] event:', payload.event, 'instance:', payload.instance)
-
-  // Filtra só mensagens de usuários
+  try { payload = await req.json() } catch { return ok() }
   if (payload.event !== 'messages.upsert') return ok()
   const data = payload.data
   if (!data?.key) return ok()
-  if (data.key.fromMe) return ok() // mensagens que ENVIAMOS, ignora
+  if (data.key.fromMe) return ok()
   if (!data.key.remoteJid) return ok()
-  if (data.key.remoteJid.endsWith('@g.us')) return ok() // grupos, ignora
+  if (data.key.remoteJid.endsWith('@g.us')) return ok()
 
   const phone = data.key.remoteJid.split('@')[0]
   const pushName = data.pushName || null
@@ -133,337 +205,118 @@ Deno.serve(async (req) => {
   const wamId = data.key.id || null
   if (!instanceName) return ok()
 
-  // Extrai conteúdo da mensagem (texto direto ou transcrição de áudio)
   let text: string | null = data.message?.conversation || data.message?.extendedTextMessage?.text || null
-  let isAudio = false
-
-  let imageBase64: string | null = null
-  let imageMimetype: string | null = null
-  let isImage = false
+  let isAudio = false, imageBase64: string | null = null, imageMimetype: string | null = null, isImage = false
 
   if (!text && data.message?.audioMessage) {
-    console.log('[bot-webhook] audio detected, transcribing...')
     const media = await fetchMediaBase64(instanceName, { key: data.key, message: data.message }, 'audio/ogg')
-    if (media) {
-      const transcribed = await transcribeAudio(media.base64, media.mimetype)
-      if (transcribed) {
-        text = transcribed
-        isAudio = true
-        console.log('[bot-webhook] transcription:', text.slice(0, 100))
-      }
-    }
-    if (!text) {
-      await sendWhatsApp(
-        instanceName,
-        phone,
-        'Oi! Recebi seu áudio mas não consegui entender agora. Pode me mandar por texto o que precisa? 🙏',
-      ).catch(() => {})
-      return ok()
-    }
+    if (media) { const t = await transcribeAudio(media.base64, media.mimetype); if (t) { text = t; isAudio = true } }
+    if (!text) { await sendWhatsApp(instanceName, phone, 'Oi! Recebi seu audio mas nao consegui entender. Pode mandar por texto?').catch(()=>{}); return ok() }
   }
-
   if (data.message?.imageMessage) {
-    console.log('[bot-webhook] image detected, fetching...')
     const media = await fetchMediaBase64(instanceName, { key: data.key, message: data.message }, 'image/jpeg')
-    if (media) {
-      // Claude aceita: jpeg, png, gif, webp. Normaliza mimetype
-      const mt = media.mimetype.split(';')[0].trim().toLowerCase()
-      const supported = ['image/jpeg', 'image/png', 'image/gif', 'image/webp']
-      if (supported.includes(mt)) {
-        imageBase64 = media.base64
-        imageMimetype = mt
-        isImage = true
-        text = data.message.imageMessage.caption || 'Enviei uma imagem. O que você acha?'
-      } else {
-        console.warn('[bot-webhook] unsupported image type:', mt)
-      }
-    }
-    if (!isImage) {
-      await sendWhatsApp(
-        instanceName,
-        phone,
-        'Oi! Recebi sua imagem mas tive dificuldade em processar. Pode me descrever em texto o que precisa?',
-      ).catch(() => {})
-      return ok()
-    }
+    if (media) { const mt = media.mimetype.split(';')[0].trim().toLowerCase(); if (['image/jpeg','image/png','image/gif','image/webp'].includes(mt)) { imageBase64 = media.base64; imageMimetype = mt; isImage = true; text = data.message.imageMessage.caption || 'Enviei uma imagem.' } }
+    if (!isImage) { await sendWhatsApp(instanceName, phone, 'Oi! Recebi sua imagem mas tive dificuldade em processar. Me descreve em texto?').catch(()=>{}); return ok() }
   }
-
   if (data.message?.videoMessage) {
-    // Vídeo: apenas reconhece caption como texto. Não processa frames no MVP.
-    text = data.message.videoMessage.caption || '[vídeo sem legenda]'
-    if (!data.message.videoMessage.caption) {
-      await sendWhatsApp(
-        instanceName,
-        phone,
-        'Oi! Recebi seu vídeo. No momento não consigo processar vídeos — pode me descrever em texto ou mandar uma foto?',
-      ).catch(() => {})
-      return ok()
-    }
+    text = data.message.videoMessage.caption || '[video sem legenda]'
+    if (!data.message.videoMessage.caption) { await sendWhatsApp(instanceName, phone, 'Oi! Recebi seu video. Nao processamos videos, me descreve em texto ou manda foto?').catch(()=>{}); return ok() }
   }
-
   if (!text || !text.trim()) return ok()
 
-  const supabaseUrl = Deno.env.get('SUPABASE_URL')!
-  const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
-  const admin = createClient(supabaseUrl, supabaseServiceKey)
+  const admin = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!)
+  if (wamId) { const { data: existing } = await admin.from('conversations').select('id').eq('whatsapp_message_id', wamId).maybeSingle(); if (existing) return ok() }
 
-  // Dedup: se já processamos essa mensagem (Evolution às vezes retry), pula
-  if (wamId) {
-    const { data: existing } = await admin
-      .from('conversations')
-      .select('id')
-      .eq('whatsapp_message_id', wamId)
-      .maybeSingle()
-    if (existing) {
-      console.log('[bot-webhook] duplicate message, skipping:', wamId)
-      return ok()
-    }
-  }
-
-  // Resolve organização pela instance
-  const { data: instance } = await admin
-    .from('whatsapp_instances')
-    .select('organization_id')
-    .eq('instance_name', instanceName)
-    .maybeSingle()
-
-  if (!instance) {
-    console.warn('[bot-webhook] unknown instance:', instanceName)
-    return ok()
-  }
+  const { data: instance } = await admin.from('whatsapp_instances').select('organization_id').eq('instance_name', instanceName).maybeSingle()
+  if (!instance) return ok()
   const orgId = instance.organization_id as string
 
-  // Busca config do bot
-  const { data: config } = await admin
-    .from('bot_config')
-    .select('*')
-    .eq('organization_id', orgId)
-    .maybeSingle()
+  const { data: config } = await admin.from('bot_config').select('*').eq('organization_id', orgId).maybeSingle()
+  if (!config || !config.is_active) return ok()
 
-  if (!config) {
-    console.warn('[bot-webhook] no bot_config for org:', orgId)
-    return ok()
-  }
-  if (!config.is_active) {
-    console.log('[bot-webhook] bot inactive, skipping')
-    return ok()
-  }
+  // Detecta se eh novo lead (antes do upsert)
+  const { data: priorLead } = await admin.from('leads').select('id').eq('organization_id', orgId).eq('phone', phone).maybeSingle()
+  const isNewLead = !priorLead
 
-  // Upsert lead
-  const { data: lead, error: leadErr } = await admin
-    .from('leads')
-    .upsert(
-      {
-        organization_id: orgId,
-        phone,
-        whatsapp_id: data.key.remoteJid,
-        name: pushName,
-        source: 'whatsapp',
-        last_message_at: new Date().toISOString(),
-      } as any,
-      { onConflict: 'organization_id,phone' },
-    )
-    .select()
-    .single()
+  // IMPORTANTE: so seta `name` quando eh lead novo. Em leads existentes, `pushName` do WhatsApp
+  // NUNCA sobrescreve o nome confirmado pela IA (via update_lead).
+  const upsertPayload: Record<string, unknown> = { organization_id: orgId, phone, whatsapp_id: data.key.remoteJid, source: 'whatsapp', last_message_at: new Date().toISOString() }
+  if (isNewLead) upsertPayload.name = pushName
+  const { data: lead, error: leadErr } = await admin.from('leads').upsert(upsertPayload as any, { onConflict: 'organization_id,phone' }).select().single()
+  if (leadErr || !lead) return ok()
 
-  if (leadErr || !lead) {
-    console.error('[bot-webhook] lead upsert failed:', leadErr)
-    return ok()
-  }
-
-  // Grava mensagem recebida (prefixo de mídia pra UI admin)
   const storedText = isImage ? `📷 ${text}` : isAudio ? `🎙️ ${text}` : text
-  await admin.from('conversations').insert({
-    lead_id: lead.id,
-    organization_id: orgId,
-    message: storedText,
-    direction: 'in',
-    whatsapp_message_id: wamId,
-  })
+  await admin.from('conversations').insert({ lead_id: lead.id, organization_id: orgId, message: storedText, direction: 'in', whatsapp_message_id: wamId })
 
-  // Rate limit per-lead: se lead mandou 5+ msgs nos últimos 10s, pula (está floodando)
+  // ======== NOTIFICA GRUPO: novo lead ========
+  if (isNewLead) {
+    const msg = `🆕 *Novo lead*\n\nNome: ${pushName || 'Sem nome'}\nTelefone: +${phone}\n\nPrimeira mensagem:\n_${text.slice(0, 150)}${text.length > 150 ? '...' : ''}_`
+    notifyGroup(admin, orgId, instanceName, msg).catch(() => {})
+  }
+
+  // ======== BOT PAUSADO: lead em atendimento humano, notifica grupo e nao chama IA ========
+  if ((lead as any).bot_paused) {
+    const reason = (lead as any).bot_paused_reason || 'atendimento humano'
+    const preview = text.slice(0, 200) + (text.length > 200 ? '...' : '')
+    const msg = `💬 *Lead em atendimento humano enviou mensagem*\n_Motivo da pausa: ${reason}_\n\n${lead.name || 'Lead'} (+${phone}):\n_${preview}_\n\n🤖 Bot NAO respondeu. Responda voce pelo WhatsApp.`
+    notifyGroup(admin, orgId, instanceName, msg).catch(() => {})
+    return ok()
+  }
+
   const tenSecAgo = new Date(Date.now() - 10_000).toISOString()
-  const { count: recentCount } = await admin
-    .from('conversations')
-    .select('id', { count: 'exact', head: true })
-    .eq('lead_id', lead.id)
-    .eq('direction', 'in')
-    .gte('sent_at', tenSecAgo)
-  if ((recentCount ?? 0) > 5) {
-    console.log('[bot-webhook] rate limit hit (flood):', lead.id)
-    return ok()
-  }
+  const { count: recentCount } = await admin.from('conversations').select('id', { count: 'exact', head: true }).eq('lead_id', lead.id).eq('direction', 'in').gte('sent_at', tenSecAgo)
+  if ((recentCount ?? 0) > 5) return ok()
 
-  // Rate limit per-org: se org passou de 300 respostas do bot nas últimas 24h, para
   const dayAgo = new Date(Date.now() - 86_400_000).toISOString()
-  const { count: dailyCount } = await admin
-    .from('conversations')
-    .select('id', { count: 'exact', head: true })
-    .eq('organization_id', orgId)
-    .eq('direction', 'out')
-    .not('ai_tool_used', 'is', null)
-    .gte('sent_at', dayAgo)
-  if ((dailyCount ?? 0) >= 300) {
-    console.warn('[bot-webhook] daily cap reached for org:', orgId)
-    const msg = 'Oi! Nosso atendimento está com alta demanda no momento. Um corretor humano vai te responder em breve.'
-    await sendWhatsApp(instanceName, phone, msg).catch(() => {})
-    await admin.from('conversations').insert({
-      lead_id: lead.id,
-      organization_id: orgId,
-      message: msg,
-      direction: 'out',
-    })
-    return ok()
-  }
+  const { count: dailyCount } = await admin.from('conversations').select('id', { count: 'exact', head: true }).eq('organization_id', orgId).eq('direction', 'out').not('ai_tool_used', 'is', null).gte('sent_at', dayAgo)
+  if ((dailyCount ?? 0) >= 300) { const msg = 'Alta demanda no momento. Um corretor vai te responder em breve.'; await sendWhatsApp(instanceName, phone, msg).catch(()=>{}); await admin.from('conversations').insert({ lead_id: lead.id, organization_id: orgId, message: msg, direction: 'out' }); return ok() }
 
-  // Check horário de atendimento
   if (config.business_hours_enabled) {
-    const now = new Date()
-    const nowMin = now.getHours() * 60 + now.getMinutes()
-    const [sH, sM] = (config.business_hours_start || '08:00').split(':').map(Number)
-    const [eH, eM] = (config.business_hours_end || '18:00').split(':').map(Number)
-    const startMin = sH * 60 + sM
-    const endMin = eH * 60 + eM
-
-    if (nowMin < startMin || nowMin > endMin) {
-      const outMsg = (config.outside_hours_message || '')
-        .replace('{inicio}', config.business_hours_start)
-        .replace('{fim}', config.business_hours_end)
+    const now = new Date(); const nowMin = now.getHours()*60+now.getMinutes()
+    const [sH,sM] = (config.business_hours_start||'08:00').split(':').map(Number)
+    const [eH,eM] = (config.business_hours_end||'18:00').split(':').map(Number)
+    if (nowMin < sH*60+sM || nowMin > eH*60+eM) {
+      const outMsg = (config.outside_hours_message || '').replace('{inicio}', config.business_hours_start).replace('{fim}', config.business_hours_end)
       await sendWhatsApp(instanceName, phone, outMsg)
-      await admin.from('conversations').insert({
-        lead_id: lead.id,
-        organization_id: orgId,
-        message: outMsg,
-        direction: 'out',
-      })
+      await admin.from('conversations').insert({ lead_id: lead.id, organization_id: orgId, message: outMsg, direction: 'out' })
       return ok()
     }
   }
 
-  // Busca contexto — APENAS campos seguros pra expor ao AI/lead.
-  // Deliberadamente NÃO trazemos cnpj, creci, state_registration, address_street/number
-  // (dados fiscais/endereço completo são sensíveis; o bot só precisa saber a cidade/UF)
-  const { data: org } = await admin
-    .from('organizations')
-    .select('legal_name, trade_name, website, email, phone, address_city, address_state')
-    .eq('id', orgId)
-    .single()
-
-  const { data: history } = await admin
-    .from('conversations')
-    .select('message, direction')
-    .eq('lead_id', lead.id)
-    .order('sent_at', { ascending: false })
-    .limit(20)
-
+  const { data: org } = await admin.from('organizations').select('legal_name, trade_name, website, email, phone, address_city, address_state').eq('id', orgId).single()
+  const { data: history } = await admin.from('conversations').select('message, direction').eq('lead_id', lead.id).order('sent_at', { ascending: false }).limit(20)
   const orderedHistory = (history ?? []).reverse()
+  const isFirstContact = orderedHistory.filter((h) => h.direction === 'out').length === 0
 
-  // Primeiro contato: histórico só tem a msg que acabamos de salvar (1 mensagem in), sem out anterior
-  const outgoingPriorCount = orderedHistory.filter((h) => h.direction === 'out').length
-  const isFirstContact = outgoingPriorCount === 0
-
-  // Busca último resultado de search_properties pra dar contexto entre turns
-  const { data: lastToolRows } = await admin
-    .from('conversations')
-    .select('ai_tool_used, ai_tool_output')
-    .eq('lead_id', lead.id)
-    .eq('ai_tool_used', 'search_properties')
-    .not('ai_tool_output', 'is', null)
-    .order('sent_at', { ascending: false })
-    .limit(1)
-
+  const { data: lastToolRows } = await admin.from('conversations').select('ai_tool_used, ai_tool_output').eq('lead_id', lead.id).eq('ai_tool_used', 'search_properties').not('ai_tool_output', 'is', null).order('sent_at', { ascending: false }).limit(1)
   const lastSearchOutput = lastToolRows?.[0]?.ai_tool_output ?? null
 
-  // Busca agendamentos ativos deste lead (pra bot poder reagendar/cancelar)
-  const { data: activeAppts } = await admin
-    .from('appointments')
-    .select('id, scheduled_at, status, notes, properties(title)')
-    .eq('lead_id', lead.id)
-    .in('status', ['agendado', 'confirmado'])
-    .gte('scheduled_at', new Date().toISOString())
-    .order('scheduled_at', { ascending: true })
+  const { data: activeAppts } = await admin.from('appointments').select('id, scheduled_at, status, notes, properties(title)').eq('lead_id', lead.id).in('status', ['agendado','confirmado']).gte('scheduled_at', new Date().toISOString()).order('scheduled_at', { ascending: true })
 
   try {
-    const response = await generateAiResponse({
-      admin,
-      orgId,
-      lead: lead as Lead,
-      org: (org ?? {}) as Organization,
-      config: config as BotConfig,
-      history: orderedHistory,
-      lastSearchOutput,
-      currentImage: imageBase64 && imageMimetype
-        ? { base64: imageBase64, mimetype: imageMimetype }
-        : null,
-      activeAppointments: activeAppts ?? [],
-      isFirstContact,
-    })
-
+    const response = await generateAiResponse({ admin, orgId, instanceName, lead: lead as Lead, org: (org ?? {}) as Organization, config: config as BotConfig, history: orderedHistory, lastSearchOutput, currentImage: imageBase64 && imageMimetype ? { base64: imageBase64, mimetype: imageMimetype } : null, activeAppointments: activeAppts ?? [], isFirstContact })
     if (response) {
       await sendWhatsApp(instanceName, phone, response.text)
-      await admin.from('conversations').insert({
-        lead_id: lead.id,
-        organization_id: orgId,
-        message: response.text,
-        direction: 'out',
-        ai_tool_used: response.toolUsed,
-        ai_tokens_used: response.tokensUsed,
-        ai_tool_output: response.toolOutput ?? null,
-      })
-
-      // Atualiza status se for primeiro contato
-      if (lead.status === 'novo') {
-        await admin.from('leads').update({ status: 'em_contato' }).eq('id', lead.id)
-      }
+      await admin.from('conversations').insert({ lead_id: lead.id, organization_id: orgId, message: response.text, direction: 'out', ai_tool_used: response.toolUsed, ai_tokens_used: response.tokensUsed, ai_tool_output: response.toolOutput ?? null })
+      if (lead.status === 'novo') await admin.from('leads').update({ status: 'em_contato' }).eq('id', lead.id)
     }
   } catch (err) {
     console.error('[bot-webhook] AI error:', err)
-    const fallback = 'Oi! Tô com uma dificuldade técnica no momento. Em instantes um corretor vai te responder. 🙏'
-    await sendWhatsApp(instanceName, phone, fallback).catch(() => {})
-    await admin.from('conversations').insert({
-      lead_id: lead.id,
-      organization_id: orgId,
-      message: fallback,
-      direction: 'out',
-    })
+    const fallback = 'Oi! Tive uma dificuldade tecnica. Em instantes um corretor vai te responder.'
+    await sendWhatsApp(instanceName, phone, fallback).catch(()=>{})
+    await admin.from('conversations').insert({ lead_id: lead.id, organization_id: orgId, message: fallback, direction: 'out' })
   }
-
   return ok()
 })
 
-// ---------- Evolution send ----------
-
 async function sendWhatsApp(instanceName: string, phone: string, text: string) {
-  const evoUrl = Deno.env.get('EVOLUTION_API_URL')!
-  const evoKey = Deno.env.get('EVOLUTION_API_KEY')!
-  const res = await fetch(`${evoUrl}/message/sendText/${instanceName}`, {
-    method: 'POST',
-    headers: { apikey: evoKey, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ number: phone, text }),
-  })
-  if (!res.ok) {
-    console.warn('[bot-webhook] sendText failed:', await res.text())
-  }
+  const res = await fetch(`${Deno.env.get('EVOLUTION_API_URL')!}/message/sendText/${instanceName}`, { method: 'POST', headers: { apikey: Deno.env.get('EVOLUTION_API_KEY')!, 'Content-Type': 'application/json' }, body: JSON.stringify({ number: phone, text }) })
+  if (!res.ok) console.warn('[bot-webhook] sendText failed:', await res.text())
 }
 
-// ---------- Audio transcription via OpenAI Whisper ----------
-
-async function fetchMediaBase64(
-  instanceName: string,
-  messagePayload: { key: unknown; message: unknown },
-  fallbackMime = 'application/octet-stream',
-): Promise<{ base64: string; mimetype: string } | null> {
-  const evoUrl = Deno.env.get('EVOLUTION_API_URL')!
-  const evoKey = Deno.env.get('EVOLUTION_API_KEY')!
-  const res = await fetch(`${evoUrl}/chat/getBase64FromMediaMessage/${instanceName}`, {
-    method: 'POST',
-    headers: { apikey: evoKey, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message: messagePayload, convertToMp4: false }),
-  })
-  if (!res.ok) {
-    console.warn('[bot-webhook] getBase64FromMediaMessage failed:', await res.text())
-    return null
-  }
+async function fetchMediaBase64(instanceName: string, messagePayload: { key: unknown; message: unknown }, fallbackMime = 'application/octet-stream') {
+  const res = await fetch(`${Deno.env.get('EVOLUTION_API_URL')!}/chat/getBase64FromMediaMessage/${instanceName}`, { method: 'POST', headers: { apikey: Deno.env.get('EVOLUTION_API_KEY')!, 'Content-Type': 'application/json' }, body: JSON.stringify({ message: messagePayload, convertToMp4: false }) })
+  if (!res.ok) return null
   const data = await res.json()
   const base64 = data.base64 || data.mediaBase64 || null
   const mimetype = data.mimetype || data.mediaType || fallbackMime
@@ -471,789 +324,377 @@ async function fetchMediaBase64(
   return { base64, mimetype }
 }
 
-async function transcribeAudio(base64: string, mimetype: string): Promise<string | null> {
-  const openaiKey = Deno.env.get('OPENAI_API_KEY')
-  if (!openaiKey) {
-    console.warn('[bot-webhook] OPENAI_API_KEY not set — audio transcription disabled')
-    return null
-  }
-
-  // Decode base64 → Uint8Array
-  const binary = atob(base64)
-  const bytes = new Uint8Array(binary.length)
+async function transcribeAudio(base64: string, mimetype: string) {
+  const openaiKey = Deno.env.get('OPENAI_API_KEY'); if (!openaiKey) return null
+  const binary = atob(base64); const bytes = new Uint8Array(binary.length)
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
-
-  const ext = mimetype.includes('mp4') ? 'mp4'
-    : mimetype.includes('mpeg') ? 'mp3'
-    : mimetype.includes('wav') ? 'wav'
-    : 'ogg'
-
+  const ext = mimetype.includes('mp4') ? 'mp4' : mimetype.includes('mpeg') ? 'mp3' : mimetype.includes('wav') ? 'wav' : 'ogg'
   const form = new FormData()
   form.append('file', new Blob([bytes], { type: mimetype }), `audio.${ext}`)
-  form.append('model', 'whisper-1')
-  form.append('language', 'pt')
-
-  const res = await fetch('https://api.openai.com/v1/audio/transcriptions', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${openaiKey}` },
-    body: form,
-  })
-  if (!res.ok) {
-    console.warn('[bot-webhook] Whisper failed:', await res.text())
-    return null
-  }
+  form.append('model', 'whisper-1'); form.append('language', 'pt')
+  const res = await fetch('https://api.openai.com/v1/audio/transcriptions', { method: 'POST', headers: { Authorization: `Bearer ${openaiKey}` }, body: form })
+  if (!res.ok) return null
   const data = await res.json()
   return (data.text as string)?.trim() || null
 }
 
-// ---------- AI (Bedrock Claude Haiku) ----------
-
 type AiResponse = { text: string; toolUsed?: string; tokensUsed?: number; toolOutput?: unknown }
 
-function formatActiveAppointments(appts?: Array<{ id: string; scheduled_at: string; status: string; properties?: { title?: string } | null }>): string {
-  if (!appts || appts.length === 0) return '(nenhum agendamento ativo pra este lead)'
-  return appts.map((a) => {
-    const d = new Date(a.scheduled_at)
-    const fmt = d.toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
-    return `[appointment_id: ${a.id}] ${fmt} / ${a.properties?.title ?? 'imóvel'} / status: ${a.status}`
-  }).join('\n')
+function formatActiveAppointments(appts?: Array<{ id: string; scheduled_at: string; status: string; properties?: { title?: string } | null }>) {
+  if (!appts || appts.length === 0) return '(nenhum agendamento ativo)'
+  return appts.map((a) => `[appointment_id: ${a.id}] ${fmtBrtShort(new Date(a.scheduled_at))} BRT / ${a.properties?.title ?? 'imovel'} / status: ${a.status}`).join('\n')
 }
 
-function buildSystemPrompt(
-  org: Organization,
-  config: BotConfig,
-  lead: Lead,
-  lastSearchOutput?: unknown,
-  activeAppointments?: Array<{ id: string; scheduled_at: string; status: string; properties?: { title?: string } | null }>,
-  isFirstContact: boolean = false,
-): string {
-  const orgName = org.trade_name || org.legal_name || 'nossa imobiliária'
-  const location = org.address_city && org.address_state
-    ? `${org.address_city}/${org.address_state}`
-    : org.address_city || ''
-
+function buildSystemPrompt(org: Organization, config: BotConfig, lead: Lead, lastSearchOutput?: unknown, activeAppointments?: any[], isFirstContact = false, hasGcal = false): string {
+  const orgName = org.trade_name || org.legal_name || 'nossa imobiliaria'
+  const location = org.address_city && org.address_state ? `${org.address_city}/${org.address_state}` : org.address_city || ''
   const style = config.communication_style || 'balanced'
-  const styleInstructions = {
-    casual: 'Tom descontraído, como um amigo experiente em imóveis. Use "você" ou "vc", gírias leves aceitas, emojis com naturalidade. Respostas curtas (1-3 linhas).',
-    balanced: 'Tom amigável e profissional ao mesmo tempo. Linguagem natural sem ser formal demais. Emojis ocasionais. Respostas curtas (1-3 linhas).',
-    formal: 'Tom profissional e cortês. Trate por "você" mas sem gírias. Emojis apenas quando muito apropriado. Respostas objetivas e respeitosas.',
-  }[style]
-
-  // Capacidades baseadas em toggles
+  const styleInstructions = { casual: 'Tom descontraido, girias leves, emojis naturais, respostas curtas.', balanced: 'Tom amigavel profissional, linguagem natural, emojis ocasionais, respostas curtas.', formal: 'Tom profissional cortes, sem girias, emojis raros, objetivo.' }[style]
   const capabilities: string[] = []
-  if (config.can_schedule) {
-    capabilities.push('- **Pode agendar visitas**: quando o lead confirmar data/hora pra visita, USE **schedule_visit** com property_id e scheduled_at. NUNCA diga "agendei" sem chamar a ferramenta. Se falta data/hora, pergunte antes.')
-  } else {
-    capabilities.push('- **NÃO agende diretamente**: quando o lead quiser agendar, diga que um corretor entrará em contato em breve pra confirmar o melhor horário. Colete a preferência dele e use **update_lead** pra registrar.')
-  }
-  if (config.can_escalate) {
-    capabilities.push('- **Pode escalar pra corretor humano**: use **escalate_to_human** quando: lead pedir explicitamente pra falar com alguém; negociação complexa (financiamento, contraproposta); dúvida fora do escopo; reclamação.')
-  } else {
-    capabilities.push('- **Não escale**: tente resolver sempre. Se não conseguir ajudar, diga que nossa equipe vai retornar o contato em horário comercial.')
-  }
-  if (config.can_negotiate_price) {
-    capabilities.push('- **Pode discutir valores**: pode sugerir negociações e apresentar propostas de desconto razoáveis (sempre dentro do cadastro; NUNCA invente preço).')
-  } else {
-    capabilities.push('- **NÃO negocie valores**: se o lead pedir desconto, diga com educação que vai passar pra equipe avaliar a proposta.')
-  }
-  if (config.show_listing_links) {
-    capabilities.push('- *Inclua SEMPRE o link do anúncio*: quando o imóvel retornado por search_properties tiver `listing_url` preenchida (não-null), OBRIGATORIAMENTE inclua essa URL pura (sem colchetes, sem texto alternativo, apenas a URL direta no final da descrição do imóvel) pra o lead acessar fotos e detalhes completos. Se listing_url for null/vazio, apenas ignore sem avisar.')
-  } else {
-    capabilities.push('- *Não envie links*: descreva os imóveis apenas em texto, sem URLs.')
-  }
-
-  // Data/hora atual em BRT para cálculo de agendamentos
+  if (config.can_schedule) capabilities.push(`- Pode agendar visitas com schedule_visit. NUNCA diga agendei sem chamar.${hasGcal ? ' (Agendamentos sao adicionados a agenda do corretor.)' : ''}`)
+  else capabilities.push('- NAO agende. Use update_lead pra registrar preferencia.')
+  if (config.can_escalate) capabilities.push('- Pode escalar com escalate_to_human.')
+  else capabilities.push('- Nao escale, tente resolver.')
+  if (config.can_negotiate_price) capabilities.push('- Pode negociar dentro do cadastro.')
+  else capabilities.push('- NAO negocie valores.')
+  if (config.show_listing_links) capabilities.push('- Inclua SEMPRE listing_url como URL pura no final de cada imovel.')
+  else capabilities.push('- Nao envie links.')
   const now = new Date()
-  const brtFormatter = new Intl.DateTimeFormat('pt-BR', {
-    timeZone: 'America/Sao_Paulo',
-    weekday: 'long',
-    year: 'numeric',
-    month: 'long',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  })
-  const currentDate = brtFormatter.format(now)
+  const currentDate = new Intl.DateTimeFormat('pt-BR', { timeZone: 'America/Sao_Paulo', weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(now)
   const currentIso = now.toISOString()
+  const brtToday = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(now).reduce<Record<string, string>>((acc, p) => { if (p.type !== 'literal') acc[p.type] = p.value; return acc }, {})
+  const baseDay = new Date(`${brtToday.year}-${brtToday.month}-${brtToday.day}T12:00:00-03:00`)
+  const dayNames = ['domingo','segunda-feira','terca-feira','quarta-feira','quinta-feira','sexta-feira','sabado']
+  const calendarRows: string[] = []
+  for (let i = 0; i < 14; i++) {
+    const d = new Date(baseDay.getTime() + i * 86400000)
+    const parts = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit', weekday: 'short' }).formatToParts(d).reduce<Record<string, string>>((acc, p) => { if (p.type !== 'literal') acc[p.type] = p.value; return acc }, {})
+    const dow = dayNames[d.getUTCDay()]
+    const label = i === 0 ? 'HOJE' : i === 1 ? 'AMANHA' : i === 2 ? 'DEPOIS DE AMANHA' : ''
+    calendarRows.push(`${parts.year}-${parts.month}-${parts.day} (${dow})${label ? ` ← ${label}` : ''}`)
+  }
+  const calendarBlock = calendarRows.join('\n')
+  const customPersona = config.persona?.trim() || [config.welcome_message, config.triagem_localizacao, config.triagem_tipo, config.triagem_orcamento, config.triagem_quartos].filter(Boolean).join('\n')
+  return `Voce e um atendente virtual da ${orgName}${location ? ` em ${location}` : ''}.
 
-  // Persona customizada (fallback pra triagem_* legado)
-  const customPersona = config.persona?.trim() || [
-    config.welcome_message,
-    config.triagem_localizacao,
-    config.triagem_tipo,
-    config.triagem_orcamento,
-    config.triagem_quartos,
-  ].filter(Boolean).join('\n')
+# Data/hora
+Agora: ${currentDate} BRT (ISO UTC: ${currentIso}). Timezone OFICIAL: BRT (-03:00).
 
-  return `Você é um atendente virtual da ${orgName}, uma imobiliária${location ? ` em ${location}` : ''}.
+# Calendario de referencia (BRT) - USE ESTA TABELA, NAO CALCULE
+${calendarBlock}
 
-# Data e hora atuais (use para calcular agendamentos)
-Agora: **${currentDate}** (ISO: ${currentIso})
-Timezone: BRT (America/Sao_Paulo, UTC-03:00)
+Quando o lead disser "segunda", "amanha", "dia 20", "semana que vem" etc, LOCALIZE a data EXATA nesta tabela antes de chamar schedule_visit. NUNCA chute o dia da semana.
 
-# Missão
-Ajudar o lead a encontrar o imóvel ideal, qualificando silenciosamente (tipo, localização, orçamento, quartos) e sugerindo imóveis disponíveis cadastrados.
+# Regra de horarios (CRITICO)
+TODO horario com o lead e em BRT. Em schedule_visit e reschedule_visit, scheduled_at DEVE incluir -03:00 explicito.
+Formato: YYYY-MM-DDTHH:MM:SS-03:00. PROIBIDO Z ou +00:00.
 
-# Tom de voz (estilo ${style})
-- ${styleInstructions}
-- NUNCA revele ser IA, bot ou assistente virtual
+# Missao
+Ajudar o lead a encontrar imoveis. Qualifique tipo, localizacao, orcamento, quartos.
 
-# Formatação de texto (WhatsApp)
-Regras estritas:
-- Negrito: use *asterisco único* (tipo *assim*). NUNCA dois asteriscos.
-- Itálico: use _underscore_
-- Tachado: use ~til~
-- NÃO use ##, ###, ** ou qualquer coisa fora disso.
-- NÃO use listas com "- item" nem "1. item". Escreva em frases corridas naturais.
-- NUNCA use travessão (— ou –). Use vírgula ou separe em frases. Exemplo: "Apartamento 2 quartos, Moema" ao invés de "Apartamento 2 quartos — Moema". Travessão fica robótico e desumaniza.
-- Emojis são bem-vindos com moderação.
+# Tom (${style})
+${styleInstructions} NUNCA revele ser IA.
 
-# Contexto da imobiliária
-${org.legal_name ? `- Razão social: ${org.legal_name}` : ''}
-${org.trade_name ? `- Nome fantasia: ${org.trade_name}` : ''}
-${org.website ? `- Site: ${org.website}` : ''}
-${org.phone ? `- Telefone: ${org.phone}` : ''}
+# Formatacao WhatsApp
+- Negrito *unico*, italico _underscore_, tachado ~til~. Nunca ** ou ##.
+- Sem listas "- item" nem "1. item", use frases.
+- NUNCA travessao (—–), use virgula.
+- Emojis com moderacao.
+
+# Contexto
+${org.legal_name ? `- Razao: ${org.legal_name}` : ''}
+${org.trade_name ? `- Fantasia: ${org.trade_name}` : ''}
 ${location ? `- Cidade: ${location}` : ''}
-${config.service_areas ? `- Regiões de atuação: ${config.service_areas}` : ''}
+${config.service_areas ? `- Regioes: ${config.service_areas}` : ''}
 ${config.company_differentials ? `- Diferenciais: ${config.company_differentials}` : ''}
+${hasGcal ? '- Agenda do corretor conectada: sim (agendamentos entram automaticamente)' : ''}
 
-${isFirstContact ? `# Primeira mensagem deste lead (PRIORIDADE MÁXIMA)
-Este é o PRIMEIRO contato do lead com a gente. Sua resposta DEVE:
-1. Começar com: "Olá! Bem-vindo(a) à *${orgName}*!" (nome em negrito com asterisco único)
-2. Se apresentar brevemente como atendente${config.can_escalate ? ' e mencionar que pode conectar com um corretor humano quando o lead quiser' : ''}
-3. Informar que o lead pode enviar *texto, áudio ou fotos* à vontade
-4. Convidar o lead a contar o que procura (sem fazer várias perguntas de uma vez)
-Mantenha a resposta em 4-6 linhas, acolhedor. NÃO pule esta instrução — é o primeiro contato.
-` : ''}
-# Suas capacidades (OBEDEÇA ESTRITAMENTE)
+${isFirstContact ? `# Primeira mensagem (PRIORIDADE)
+1. Comece com: "Ola! Bem-vindo(a) a *${orgName}*!"
+2. Apresente-se como atendente${config.can_escalate ? ' mencionando corretor humano disponivel' : ''}
+3. Diga que pode receber *texto, audio ou fotos*
+4. Convide o lead a contar o que procura
+4-6 linhas, acolhedor.
+` : ''}# Capacidades
 ${capabilities.join('\n')}
 
-${customPersona ? `# Instruções adicionais do time\n${customPersona}\n` : ''}
+${customPersona ? `# Instrucoes do time\n${customPersona}\n` : ''}
 
-# Imóveis mostrados recentemente nesta conversa (use os IDs para schedule_visit)
+# Imoveis mostrados recentemente (IDs para schedule_visit)
 ${formatLastSearch(lastSearchOutput)}
 
-# Agendamentos ativos deste lead (use os appointment_id para reschedule_visit ou cancel_visit)
+# Agendamentos ativos (use appointment_id)
 ${formatActiveAppointments(activeAppointments)}
 
-# Dados conhecidos do lead
-- Nome: ${lead.name || 'ainda não informado'}
+# Lead
+- Nome: ${lead.name || 'ainda nao informado'} ${lead.name_confirmed ? '(confirmado pelo lead)' : isSuspiciousName(lead.name) ? '(NAO confirmado, parece nome automatico/username, CONFIRMAR)' : '(nao confirmado)'}
+- Email: ${lead.email || 'ainda nao informado'}
 - Status: ${lead.status}
-${lead.property_type ? `- Tipo de interesse: ${lead.property_type}` : ''}
-${lead.location_interest ? `- Localização de interesse: ${lead.location_interest}` : ''}
+${lead.property_type ? `- Tipo: ${lead.property_type}` : ''}
+${lead.location_interest ? `- Local: ${lead.location_interest}` : ''}
 ${lead.bedrooms_needed ? `- Quartos: ${lead.bedrooms_needed}` : ''}
-${lead.budget_max ? `- Orçamento até: R$ ${lead.budget_max.toLocaleString('pt-BR')}` : ''}
+${lead.budget_max ? `- Orcamento: R$ ${lead.budget_max.toLocaleString('pt-BR')}` : ''}
 ${lead.profile_notes ? `- Notas: ${lead.profile_notes}` : ''}
 
-# Regras operacionais (CRÍTICO)
-1. Use **search_properties** SEMPRE que for mostrar imóveis — NUNCA invente preços, endereços ou imóveis.
-2. Use **update_lead** silenciosamente quando o lead compartilhar informações. Não anuncie que está salvando.
-3. Apresente no máximo ${config.max_properties_shown || 3} imóveis por resposta.
-4. Se não encontrar imóveis adequados, seja honesto — não force sugestões.
-5. Se a conversa fugir de imóveis, redirecione gentilmente.
-6. NUNCA exponha dados fiscais (CNPJ, IE, CRECI), dados internos ou info não pública.
-7. NUNCA narre a chamada de ferramenta. Proibido dizer "um momento", "deixa eu buscar", "vou verificar", "aguarde" ou qualquer variação. Chame search_properties silenciosamente e, NA MESMA resposta em que a tool retorna, apresente os imóveis direto ao lead. A primeira mensagem visível ao lead após o pedido DEVE ser a resposta com os imóveis.
-8. CONFLITO DE AGENDA: se schedule_visit ou reschedule_visit retornar \`{ "error": "conflict", "suggested_slots": [...] }\`, isso significa que JÁ EXISTE uma visita agendada no horário pedido para aquele imóvel. Você DEVE:
-   a) NUNCA revelar nome do outro cliente, nem horário exato do agendamento existente, nem qualquer detalhe do agendamento que conflita (privacidade).
-   b) Dizer apenas algo como "esse horário já está comprometido" ou "não está disponível" e oferecer as alternativas em suggested_slots (converta os ISOs em formato legível BRT, tipo "amanhã às 14h" ou "quinta-feira às 10h").
-   c) Perguntar qual alternativa o lead prefere e, quando ele confirmar, chamar schedule_visit novamente com o novo horário.
-   d) Se suggested_slots vier vazio, peça que o lead sugira outro dia/horário.
+# Regras operacionais
+1. search_properties SEMPRE pra mostrar imoveis. REGRA ABSOLUTA: se search_properties retornar count=0 ou vazio, VOCE NAO PODE inventar imoveis (titulos, precos, enderecos, IDs). Diga ao lead honestamente que nao achou correspondencia e sugira ampliar criterios.
+2. update_lead silenciosamente.
+3. Max ${config.max_properties_shown || 3} imoveis por resposta.
+4. Sem imoveis adequados, seja honesto.
+5. NUNCA exponha CNPJ, IE, CRECI.
+6. NUNCA narre tool. Proibido "um momento", "deixa eu buscar". Chame silenciosamente e na MESMA resposta apresente os imoveis.
+7. HORARIOS em BRT com -03:00 explicito.
+8. CONFLITO: se tool retornar error=conflict + suggested_slots, NUNCA revele detalhes do outro evento. Ofereca alternativas em BRT legivel. Pergunte qual prefere.
+9. PROIBIDO mencionar "Google Calendar", "Gcal" ou qualquer provedor externo ao lead. Se precisar confirmar sincronizacao, diga apenas "adicionei na agenda do corretor".
+10. NOME do lead: se marcado "(NAO confirmado, parece nome automatico/username, CONFIRMAR)", pergunte educadamente o nome real antes de seguir com triagem. Ex: "Antes de continuar, como prefere que eu te chame?". Quando o lead responder, chame update_lead({name: "Nome Real"}). NUNCA use um nome suspeito como se fosse o real.
+11. EMAIL (ANTES de agendar, NUNCA depois): ${hasGcal ? 'quando o lead confirmar um imovel + data/hora e ANTES de voce chamar schedule_visit, pergunte educadamente: "Quer receber a confirmacao por email? Se sim, me passa seu email pra eu ja incluir na agenda." Se informar email, chame update_lead({email}) PRIMEIRO, e SO ENTAO chame schedule_visit (o convite vai junto automaticamente). Se recusar ou nao responder de boa, chame schedule_visit direto.' : '(agenda do corretor nao conectada nesta org; nao oferte convite por email)'}
+12. FIM DE ATENDIMENTO: apos schedule_visit com ok=true OU escalate_to_human, esta e a ULTIMA mensagem automatizada. Finalize com despedida breve e calorosa. NAO faca perguntas do tipo "mais alguma coisa?" "posso ajudar em algo mais?" - o corretor humano assume a partir daqui. Bot sera pausado apos esta resposta.
+13. APRESENTACAO DE IMOVEIS: quando search_properties retornar count>0, VOCE DEVE apresentar TODOS os imoveis da lista imediatamente com titulo, preco, endereco. PROIBIDO responder "nao encontrei" quando count>0. PROIBIDO inventar titulos/precos/IDs; use apenas os dados que vieram no tool result.
+14. NAO NARRE TOOL: PROIBIDO frases como "vou buscar", "um momento", "deixa eu verificar", "procurando", "aguarde". Chame tool silenciosamente e apresente o resultado direto.
 `
 }
 
-// Converte markdown comum do Claude pro formato aceito pelo WhatsApp
 function sanitizeForWhatsApp(text: string): string {
-  return text
-    // **bold** → *bold* (WhatsApp usa single asterisk)
-    .replace(/\*\*([^*]+?)\*\*/g, '*$1*')
-    // __italic__ → _italic_
-    .replace(/__([^_]+?)__/g, '_$1_')
-    // Remove ## headings (WhatsApp não renderiza)
-    .replace(/^\s*#{1,6}\s+/gm, '')
-    // Remove "---" dividers
-    .replace(/^\s*-{3,}\s*$/gm, '')
-    // Remove list markers "- " no início de linha (vira frase natural)
-    .replace(/^\s*[-*•]\s+/gm, '')
-    // Em-dash e en-dash fora de compound words — remove (fica desumanizado)
-    // "Apartamento — Moema" → "Apartamento, Moema"
-    .replace(/\s+[—–]\s+/g, ', ')
-    .replace(/[—–]/g, ', ')
-    // Link markdown [text](url) → só a URL
-    .replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, '$2')
-    // Limpeza final: espaços duplos e trailing
-    .replace(/  +/g, ' ')
-    .replace(/ +,/g, ',')
-    .trim()
+  // 1) Strip narration sentences entirely (ex: "Vou buscar...", "Um momento...", "Deixa eu verificar...")
+  const narrationSentenceRe = /[^.!?\n]*\b(um momento|um instante|so um momento|só um momento|aguarde|aguardando|procurando|buscando|checando|pesquisando|deixa eu (buscar|verificar|procurar|checar|pesquisar)|vou (buscar|verificar|procurar|checar|pesquisar))\b[^.!?\n]*[.!?…]?\s*/gi
+  text = text.replace(narrationSentenceRe, '')
+  // 2) Collapse double blank lines left behind
+  text = text.replace(/\n{3,}/g, '\n\n')
+  // 3) Existing WhatsApp-specific cleanup
+  return text.replace(/\*\*([^*]+?)\*\*/g, '*$1*').replace(/__([^_]+?)__/g, '_$1_').replace(/^\s*#{1,6}\s+/gm, '').replace(/^\s*-{3,}\s*$/gm, '').replace(/^\s*[-*•]\s+/gm, '').replace(/\s+[—–]\s+/g, ', ').replace(/[—–]/g, ', ').replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, '$2').replace(/  +/g, ' ').replace(/ +,/g, ',').trim()
 }
 
 function formatLastSearch(output: unknown): string {
-  if (!output || typeof output !== 'object') return '(nenhum imóvel consultado ainda nesta conversa)'
-  const obj = output as { properties?: Array<{ id?: string; title?: string; price?: number; rent_price?: number; address?: string }> }
+  if (!output || typeof output !== 'object') return '(nenhum imovel consultado)'
+  const obj = output as { properties?: Array<any> }
   const props = obj.properties
-  if (!Array.isArray(props) || props.length === 0) return '(busca anterior não retornou imóveis)'
-  return props.slice(0, 5).map((p) => {
-    const priceParts = []
-    if (p.price) priceParts.push(`R$ ${p.price.toLocaleString('pt-BR')} venda`)
-    if (p.rent_price) priceParts.push(`R$ ${p.rent_price.toLocaleString('pt-BR')}/mês aluguel`)
-    return `[ID: ${p.id}] ${p.title} / ${p.address ?? ''} / ${priceParts.join(' · ')}`
-  }).join('\n')
+  if (!Array.isArray(props) || props.length === 0) return '(busca anterior vazia)'
+  return props.slice(0, 5).map((p) => { const parts = []; if (p.price) parts.push(`R$ ${p.price.toLocaleString('pt-BR')} venda`); if (p.rent_price) parts.push(`R$ ${p.rent_price.toLocaleString('pt-BR')}/mes`); return `[ID: ${p.id}] ${p.title} / ${p.address ?? ''} / ${parts.join(' / ')}` }).join('\n')
 }
 
 function toolDefinitions(config: BotConfig) {
   const tools: unknown[] = [
-    {
-      name: 'search_properties',
-      description: 'Busca imóveis disponíveis. Traduza o que o lead descreve em filtros concretos. Se retornar 0, use o hint do resultado pra sugerir ampliar critérios.',
-      input_schema: {
-        type: 'object',
-        properties: {
-          type: { type: 'string', description: 'Tipo: apartamento, casa, cobertura, studio, kitnet, loft, flat, sobrado, terreno, galpao, sala_comercial, predio, rural.' },
-          city: { type: 'string', description: 'Cidade (ex: "São Paulo")' },
-          neighborhood: { type: 'string', description: 'Bairro (ex: "Pinheiros", "Moema", "Itaim")' },
-          min_price: { type: 'number', description: 'Preço mínimo em reais' },
-          max_price: { type: 'number', description: 'Preço máximo em reais' },
-          bedrooms: { type: 'number', description: 'Número mínimo de quartos' },
-          listing_purpose: { type: 'string', enum: ['sale', 'rent'], description: 'Use apenas se o lead EXPLICITAMENTE quiser só venda OU só aluguel. Omita este campo se o lead não disse qual — o bot retorna tudo por padrão.' },
-          amenities: {
-            type: 'array',
-            items: { type: 'string' },
-            description: 'Amenidades desejadas. Valores: pool, gym, sauna, barbecue, party_room, playground, concierge_24h, elevator, balcony, gourmet_balcony, ac, pet_friendly, bike_rack, great_view, gourmet_space, green_area, concierge_service, coworking, rooftop, wheelchair.',
-          },
-        },
-      },
-    },
-    {
-      name: 'update_lead',
-      description: 'Atualiza dados do lead silenciosamente quando ele compartilha informações (nome, orçamento, preferências). Não anuncie o uso desta ferramenta ao lead.',
-      input_schema: {
-        type: 'object',
-        properties: {
-          name: { type: 'string' },
-          property_type: { type: 'string' },
-          location_interest: { type: 'string' },
-          bedrooms_needed: { type: 'number' },
-          budget_min: { type: 'number' },
-          budget_max: { type: 'number' },
-          profile_notes: { type: 'string', description: 'Observações importantes sobre o lead' },
-        },
-      },
-    },
+    { name: 'search_properties', description: 'Busca imoveis disponiveis.', input_schema: { type: 'object', properties: { type: { type: 'string' }, city: { type: 'string' }, neighborhood: { type: 'string' }, min_price: { type: 'number' }, max_price: { type: 'number' }, bedrooms: { type: 'number' }, listing_purpose: { type: 'string', enum: ['sale','rent'] }, amenities: { type: 'array', items: { type: 'string' } } } } },
+    { name: 'update_lead', description: 'Atualiza dados do lead silenciosamente. Use name quando o lead confirmar o nome real; use email se ele espontaneamente informar o email antes do agendamento.', input_schema: { type: 'object', properties: { name: { type: 'string' }, property_type: { type: 'string' }, location_interest: { type: 'string' }, bedrooms_needed: { type: 'number' }, budget_min: { type: 'number' }, budget_max: { type: 'number' }, profile_notes: { type: 'string' }, email: { type: 'string' } } } },
   ]
-
   if (config.can_schedule) {
-    tools.push({
-      name: 'schedule_visit',
-      description: 'OBRIGATÓRIO quando o lead aceitar agendar uma visita. Cria o agendamento no sistema. NUNCA diga "agendei" ou "marquei" sem chamar esta ferramenta — seria mentira. Se não tiver data/hora específica do lead, confirme a data/hora com ele ANTES de chamar.',
-      input_schema: {
-        type: 'object',
-        properties: {
-          property_id: { type: 'string', description: 'ID do imóvel (UUID retornado por search_properties). Obrigatório.' },
-          scheduled_at: { type: 'string', description: 'Data e hora da visita no formato ISO 8601 com timezone BRT (exemplo: "2026-04-18T15:00:00-03:00").' },
-          notes: { type: 'string', description: 'Observações da visita (opcional).' },
-        },
-        required: ['property_id', 'scheduled_at'],
-      },
-    })
-
-    tools.push({
-      name: 'reschedule_visit',
-      description: 'OBRIGATÓRIO quando o lead pedir pra mudar/remarcar uma visita já agendada. Use appointment_id da lista de "Agendamentos ativos deste lead". NUNCA diga "remarquei" sem chamar esta ferramenta.',
-      input_schema: {
-        type: 'object',
-        properties: {
-          appointment_id: { type: 'string', description: 'UUID do agendamento existente (veja "Agendamentos ativos deste lead" no contexto).' },
-          new_scheduled_at: { type: 'string', description: 'Nova data e hora ISO 8601 com timezone BRT.' },
-          reason: { type: 'string', description: 'Motivo da remarcação (opcional).' },
-        },
-        required: ['appointment_id', 'new_scheduled_at'],
-      },
-    })
-
-    tools.push({
-      name: 'cancel_visit',
-      description: 'OBRIGATÓRIO quando o lead pedir pra cancelar uma visita. Use appointment_id da lista de agendamentos ativos. NUNCA diga "cancelei" sem chamar esta ferramenta.',
-      input_schema: {
-        type: 'object',
-        properties: {
-          appointment_id: { type: 'string', description: 'UUID do agendamento a cancelar.' },
-          reason: { type: 'string', description: 'Motivo do cancelamento (opcional).' },
-        },
-        required: ['appointment_id'],
-      },
-    })
+    tools.push({ name: 'schedule_visit', description: 'Cria agendamento. Pode retornar conflict com suggested_slots.', input_schema: { type: 'object', properties: { property_id: { type: 'string' }, scheduled_at: { type: 'string', description: 'BRT YYYY-MM-DDTHH:MM:SS-03:00' }, notes: { type: 'string' } }, required: ['property_id','scheduled_at'] } })
+    tools.push({ name: 'reschedule_visit', description: 'Remarca visita.', input_schema: { type: 'object', properties: { appointment_id: { type: 'string' }, new_scheduled_at: { type: 'string', description: 'BRT YYYY-MM-DDTHH:MM:SS-03:00' }, reason: { type: 'string' } }, required: ['appointment_id','new_scheduled_at'] } })
+    tools.push({ name: 'cancel_visit', description: 'Cancela visita.', input_schema: { type: 'object', properties: { appointment_id: { type: 'string' }, reason: { type: 'string' } }, required: ['appointment_id'] } })
+    tools.push({ name: 'send_invite_by_email', description: 'Envia convite de calendario por email para um agendamento ja criado. Use apos o lead confirmar que quer receber o convite e fornecer o email.', input_schema: { type: 'object', properties: { appointment_id: { type: 'string' }, email: { type: 'string' } }, required: ['appointment_id','email'] } })
   }
-
-  if (config.can_escalate) {
-    tools.push({
-      name: 'escalate_to_human',
-      description: 'Transfere o atendimento pra um corretor humano. Use quando: (1) lead pedir pra falar com alguém humano, (2) negociação virar complexa (financiamento, contraproposta), (3) reclamação séria, (4) fora do escopo.',
-      input_schema: {
-        type: 'object',
-        properties: {
-          reason: { type: 'string', description: 'Motivo da escalação em uma frase.' },
-          urgency: { type: 'string', enum: ['low', 'normal', 'high'] },
-        },
-        required: ['reason'],
-      },
-    })
-  }
-
+  if (config.can_escalate) tools.push({ name: 'escalate_to_human', description: 'Escala pra corretor humano.', input_schema: { type: 'object', properties: { reason: { type: 'string' }, urgency: { type: 'string', enum: ['low','normal','high'] } }, required: ['reason'] } })
   return tools
 }
 
-// Parse datetime tratando como BRT quando Claude esquecer o offset.
-// Se vier "2026-04-18T13:00:00" (sem tz) ou "...Z" ou "...+0X", normaliza pra BRT local.
-// Se vier com "-03:00" explícito, respeita.
-function parseBrtDate(input: string): Date | null {
-  const s = input.trim()
-  const m = s.match(/^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}(?::\d{2})?)(?:\.\d+)?(Z|[+-]\d{2}:?\d{2})?$/)
-  if (!m) {
-    const d = new Date(s)
-    return isNaN(d.getTime()) ? null : d
-  }
-  const [, date, time] = m
-  return new Date(`${date}T${time}-03:00`)
-}
-
-// Formata Date como ISO com offset -03:00 (sem converter pra UTC)
-function toBrtIso(d: Date): string {
-  // Pega Y-M-D H:M:S em BRT
-  const parts = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'America/Sao_Paulo',
-    year: 'numeric', month: '2-digit', day: '2-digit',
-    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
-  }).formatToParts(d).reduce<Record<string, string>>((acc, p) => {
-    if (p.type !== 'literal') acc[p.type] = p.value
-    return acc
-  }, {})
-  const h = parts.hour === '24' ? '00' : parts.hour
-  return `${parts.year}-${parts.month}-${parts.day}T${h}:${parts.minute}:${parts.second}-03:00`
-}
-
-// Checa se existe appointment no mesmo imovel dentro de janela de +/- windowMin minutos.
-// Retorna apenas contagem — nunca expoe detalhes do agendamento existente.
-async function hasConflictingAppointment(
-  admin: SupabaseClient,
-  orgId: string,
-  propertyId: string,
-  at: Date,
-  windowMin = 30,
-  excludeApptId?: string,
-): Promise<boolean> {
-  const from = new Date(at.getTime() - windowMin * 60_000).toISOString()
-  const to = new Date(at.getTime() + windowMin * 60_000).toISOString()
-  let q = admin
-    .from('appointments')
-    .select('id', { count: 'exact', head: true })
-    .eq('organization_id', orgId)
-    .eq('property_id', propertyId)
-    .in('status', ['agendado', 'confirmado'])
-    .gte('scheduled_at', from)
-    .lte('scheduled_at', to)
-  if (excludeApptId) q = q.neq('id', excludeApptId)
-  const { count, error } = await q
-  if (error) return false
-  return (count ?? 0) > 0
-}
-
-// Gera sugestoes de horarios livres em torno do horario pedido.
-// Regras: dentro de horario comercial (9h-18h BRT), alinhado em blocos de 30min,
-// pula conflitos no mesmo imovel. Retorna ate maxSuggestions ISO strings em BRT.
-async function suggestAvailableSlots(
-  admin: SupabaseClient,
-  orgId: string,
-  propertyId: string,
-  wanted: Date,
-  maxSuggestions = 3,
-  windowMin = 30,
-): Promise<string[]> {
-  const suggestions: string[] = []
-  const now = Date.now()
-  // Candidatos: mesmo dia a partir da hora pedida (+30, +60, +90, +120),
-  // depois mesmo dia 2h ANTES (se ainda futuro), depois proximos 2 dias 10h/11h/14h/15h/16h.
-  const candidates: Date[] = []
-
-  // Helper para criar Date em BRT a partir de componentes
-  function brtDate(baseDate: Date, hour: number, minute: number): Date {
-    // Extrai Y-M-D em BRT do baseDate
-    const parts = new Intl.DateTimeFormat('en-CA', {
-      timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit',
-    }).formatToParts(baseDate).reduce<Record<string, string>>((acc, p) => {
-      if (p.type !== 'literal') acc[p.type] = p.value
-      return acc
-    }, {})
-    const hh = String(hour).padStart(2, '0')
-    const mm = String(minute).padStart(2, '0')
-    return new Date(`${parts.year}-${parts.month}-${parts.day}T${hh}:${mm}:00-03:00`)
-  }
-
-  // Hora do wanted em BRT
-  const wantedParts = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit', hour12: false,
-  }).formatToParts(wanted).reduce<Record<string, string>>((acc, p) => {
-    if (p.type !== 'literal') acc[p.type] = p.value
-    return acc
-  }, {})
-  let wantedH = parseInt(wantedParts.hour, 10)
-  if (wantedH === 24) wantedH = 0
-  const wantedM = parseInt(wantedParts.minute, 10)
-
-  // Mesmo dia: deltas em minutos a partir do wanted
-  const sameDayDeltas = [30, 60, 90, 120, -60, -30, -90, -120, 180, 240]
-  for (const delta of sameDayDeltas) {
-    const totalMin = wantedH * 60 + wantedM + delta
-    if (totalMin < 9 * 60 || totalMin > 18 * 60) continue
-    const h = Math.floor(totalMin / 60)
-    const m = totalMin % 60
-    if (m !== 0 && m !== 30) continue
-    const c = brtDate(wanted, h, m)
-    if (c.getTime() > now) candidates.push(c)
-  }
-
-  // Proximos 3 dias, horarios comuns
-  for (let dayOffset = 1; dayOffset <= 3; dayOffset++) {
-    const d = new Date(wanted.getTime() + dayOffset * 86_400_000)
-    for (const [h, m] of [[10, 0], [11, 0], [14, 0], [15, 0], [16, 0], [17, 0]]) {
-      const c = brtDate(d, h, m)
-      if (c.getTime() > now) candidates.push(c)
-    }
-  }
-
-  // Testa candidatos em ordem, pula conflitos
-  for (const c of candidates) {
-    if (suggestions.length >= maxSuggestions) break
-    const conflict = await hasConflictingAppointment(admin, orgId, propertyId, c, windowMin)
-    if (!conflict) {
-      suggestions.push(toBrtIso(c))
-    }
-  }
-  return suggestions
-}
-
-async function executeTool(
-  toolName: string,
-  input: Record<string, unknown>,
-  ctx: { admin: SupabaseClient; orgId: string; leadId: string; maxProps: number },
-): Promise<string> {
+async function executeTool(toolName: string, input: Record<string, unknown>, ctx: { admin: SupabaseClient; orgId: string; instanceName: string; leadId: string; maxProps: number }): Promise<string> {
   if (toolName === 'search_properties') {
-    let q = ctx.admin
-      .from('properties')
-      .select('*')
-      .eq('organization_id', ctx.orgId)
-      .eq('listing_status', 'available')
+    let q = ctx.admin.from('properties').select('*').eq('organization_id', ctx.orgId).eq('listing_status', 'available')
     if (input.type) q = q.eq('type', String(input.type).toLowerCase())
-    // Fuzzy: 'city' pode vir com valor de bairro — casa nos dois campos
-    if (input.city) q = q.or(`city.ilike.%${input.city}%,neighborhood.ilike.%${input.city}%`)
-    if (input.neighborhood) q = q.or(`neighborhood.ilike.%${input.neighborhood}%,city.ilike.%${input.neighborhood}%`)
+    if (input.city) { const v = unaccent(String(input.city)); q = q.or(`city.ilike.%${v}%,neighborhood.ilike.%${v}%`) }
+    if (input.neighborhood) { const v = unaccent(String(input.neighborhood)); q = q.or(`neighborhood.ilike.%${v}%,city.ilike.%${v}%`) }
     if (input.min_price) q = q.gte('price', Number(input.min_price))
     if (input.max_price) q = q.lte('price', Number(input.max_price))
     if (input.bedrooms) q = q.gte('bedrooms', Number(input.bedrooms))
-    if (input.listing_purpose) {
-      const lp = String(input.listing_purpose)
-      if (lp === 'sale' || lp === 'rent') {
-        // Imóveis com purpose='both' atendem tanto venda quanto aluguel
-        q = q.or(`listing_purpose.eq.${lp},listing_purpose.eq.both`)
-      }
-      // Se 'both' ou desconhecido, não restringe — retorna tudo (sale+rent+both)
-    }
-    if (input.amenities && Array.isArray(input.amenities) && input.amenities.length > 0) {
-      // amenities é text[]; requer que o imóvel tenha TODAS as amenities pedidas
-      q = q.contains('amenities', input.amenities as string[])
-    }
-    // Prioriza destaques e imóveis mais recentes
-    q = q.order('featured', { ascending: false }).order('created_at', { ascending: false })
-    q = q.limit(ctx.maxProps)
+    if (input.listing_purpose) { const lp = String(input.listing_purpose); if (lp==='sale'||lp==='rent') q = q.or(`listing_purpose.eq.${lp},listing_purpose.eq.both`) }
+    if (input.amenities && Array.isArray(input.amenities) && input.amenities.length > 0) q = q.contains('amenities', input.amenities as string[])
+    q = q.order('featured', { ascending: false }).order('created_at', { ascending: false }).limit(ctx.maxProps)
     const { data, error } = await q
     if (error) return JSON.stringify({ error: error.message })
-    const slim = (data ?? []).map((p: any) => ({
-      id: p.id,
-      title: p.title,
-      type: p.type,
-      featured: p.featured,
-      listing_purpose: p.listing_purpose,
-      address: [p.location, p.neighborhood, p.address_city || p.city].filter(Boolean).join(', '),
-      price: p.price,
-      rent_price: p.rent_price,
-      condo_fee: p.condo_fee,
-      iptu: p.iptu,
-      bedrooms: p.bedrooms,
-      suites: p.suites,
-      bathrooms: p.bathrooms,
-      parking_spots: p.parking_spots,
-      area_m2: p.area_m2,
-      total_area_m2: p.total_area_m2,
-      floor: p.floor,
-      year_built: p.year_built,
-      furnished: p.furnished,
-      description: p.description,
-      amenities: p.amenities,
-      listing_url: p.listing_url,
-    }))
-    // Se nenhum resultado, dá hint ao AI
-    if (slim.length === 0) {
-      // Conta total de imóveis disponíveis pra dar contexto
-      const { count: totalAvailable } = await ctx.admin
-        .from('properties')
-        .select('id', { count: 'exact', head: true })
-        .eq('organization_id', ctx.orgId)
-        .eq('listing_status', 'available')
-      return JSON.stringify({
-        count: 0,
-        properties: [],
-        hint: `Nenhum imóvel encontrado com esses filtros. Cadastro total disponível: ${totalAvailable ?? 0}. Sugira ao lead amenizar algum critério (ampliar faixa de preço, considerar bairro vizinho, etc).`,
-      })
-    }
-    return JSON.stringify({ count: slim.length, properties: slim })
+    const slim = (data ?? []).map((p: any) => ({ id: p.id, title: p.title, type: p.type, featured: p.featured, listing_purpose: p.listing_purpose, address: [p.location, p.neighborhood, p.address_city || p.city].filter(Boolean).join(', '), price: p.price, rent_price: p.rent_price, condo_fee: p.condo_fee, iptu: p.iptu, bedrooms: p.bedrooms, suites: p.suites, bathrooms: p.bathrooms, parking_spots: p.parking_spots, area_m2: p.area_m2, floor: p.floor, year_built: p.year_built, furnished: p.furnished, description: p.description, amenities: p.amenities, listing_url: p.listing_url }))
+    if (slim.length === 0) { const { count } = await ctx.admin.from('properties').select('id', { count: 'exact', head: true }).eq('organization_id', ctx.orgId).eq('listing_status', 'available'); return JSON.stringify({ count: 0, properties: [], hint: `ATENCAO CRITICO: 0 imoveis encontrados com esses filtros. Total disponivel na base: ${count ?? 0}. PROIBIDO inventar ou citar imoveis (titulos, precos, IDs, enderecos). VOCE DEVE informar ao lead que nao achou correspondencia exata e sugerir: ampliar faixa de preco, trocar bairro, remover algum filtro. Se ja tinha mostrado imoveis antes nesta conversa, use os IDs daqueles. NUNCA invente.` }) }
+    return JSON.stringify({ count: slim.length, properties: slim, ai_instruction: `ENCONTRADOS ${slim.length} imoveis REAIS nesta busca. Apresente TODOS eles agora na resposta com titulo, preco, endereco e (se permitido) link. PROIBIDO dizer "nao encontrei" / "infelizmente nao achei" - count=${slim.length} > 0. Use EXATAMENTE os IDs, titulos e enderecos da lista properties acima; NUNCA invente.` })
   }
-
   if (toolName === 'update_lead') {
     const patch: Record<string, unknown> = {}
-    for (const k of ['name', 'property_type', 'location_interest', 'bedrooms_needed', 'budget_min', 'budget_max', 'profile_notes']) {
-      if (input[k] != null) patch[k] = input[k]
-    }
+    for (const k of ['name','property_type','location_interest','bedrooms_needed','budget_min','budget_max','profile_notes','email']) if (input[k] != null) patch[k] = input[k]
     if (Object.keys(patch).length === 0) return JSON.stringify({ ok: true })
+    if (typeof patch.email === 'string') {
+      const e = String(patch.email).trim().toLowerCase()
+      if (!isValidEmail(e)) return JSON.stringify({ error: 'Email invalido. Peca novamente ou pule.' })
+      patch.email = e
+    }
+    if (typeof patch.name === 'string' && patch.name.trim().length >= 2) patch.name_confirmed = true
     const { error } = await ctx.admin.from('leads').update(patch).eq('id', ctx.leadId)
     if (error) return JSON.stringify({ error: error.message })
     return JSON.stringify({ ok: true, updated: Object.keys(patch) })
   }
-
   if (toolName === 'escalate_to_human') {
-    const reason = String(input.reason ?? 'Escalação automática').trim()
+    const reason = String(input.reason ?? '').trim()
     const urgency = String(input.urgency ?? 'normal')
     const stamp = new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })
     const noteLine = `[${stamp}] Bot escalou: ${reason} (${urgency})`
+    const { data: leadRow } = await ctx.admin.from('leads').select('profile_notes, name, phone').eq('id', ctx.leadId).single()
+    const newNotes = leadRow?.profile_notes ? `${leadRow.profile_notes}\n${noteLine}` : noteLine
+    // PAUSE bot: corretor humano assume daqui.
+    await ctx.admin.from('leads').update({ status: 'em_contato', profile_notes: newNotes, bot_paused: true, bot_paused_at: new Date().toISOString(), bot_paused_reason: 'escalado_humano' }).eq('id', ctx.leadId)
 
-    // Fetch existing lead notes e anexa
-    const { data: leadRow } = await ctx.admin
-      .from('leads')
-      .select('profile_notes')
-      .eq('id', ctx.leadId)
-      .single()
-    const newNotes = leadRow?.profile_notes
-      ? `${leadRow.profile_notes}\n${noteLine}`
-      : noteLine
+    // NOTIFICA GRUPO: escalation + bot pausado
+    const urgencyEmoji = urgency === 'high' ? '🚨' : '⚠️'
+    const msg = `${urgencyEmoji} *Lead pediu atendente humano*\n\nLead: ${leadRow?.name || 'Sem nome'} (+${leadRow?.phone})\nUrgencia: ${urgency}\nMotivo: ${reason}\n\n🤖 Bot pausado. Voce assume as proximas mensagens.`
+    notifyGroup(ctx.admin, ctx.orgId, ctx.instanceName, msg).catch(() => {})
 
-    await ctx.admin.from('leads').update({
-      status: 'em_contato',
-      profile_notes: newNotes,
-    }).eq('id', ctx.leadId)
-
-    return JSON.stringify({ ok: true, escalated: true, reason, urgency })
+    return JSON.stringify({ ok: true, escalated: true, reason, urgency, bot_paused_after_this: true, ai_instruction: 'Confirme ao lead que um corretor humano vai entrar em contato em breve. Seja breve e caloroso. Esta e a ULTIMA mensagem automatizada.' })
   }
-
   if (toolName === 'schedule_visit') {
     const propertyId = String(input.property_id ?? '').trim()
     const scheduledAt = String(input.scheduled_at ?? '').trim()
     const notes = input.notes ? String(input.notes) : null
-
-    if (!propertyId || !scheduledAt) {
-      return JSON.stringify({ error: 'property_id e scheduled_at são obrigatórios' })
-    }
-
-    // Parse forçando BRT (Claude às vezes esquece o offset)
+    if (!propertyId || !scheduledAt) return JSON.stringify({ error: 'property_id e scheduled_at obrigatorios' })
     const date = parseBrtDate(scheduledAt)
-    if (!date || isNaN(date.getTime())) {
-      return JSON.stringify({ error: 'Data inválida, use formato ISO 8601 (ex: 2026-04-18T15:00:00-03:00)' })
-    }
-    if (date.getTime() < Date.now()) {
-      return JSON.stringify({ error: 'Data da visita precisa ser no futuro' })
-    }
+    if (!date || isNaN(date.getTime())) return JSON.stringify({ error: 'Data invalida' })
+    if (date.getTime() < Date.now()) return JSON.stringify({ error: 'Data precisa ser futura' })
+    const { data: prop } = await ctx.admin.from('properties').select('id, title, location, neighborhood, city').eq('id', propertyId).eq('organization_id', ctx.orgId).maybeSingle()
+    if (!prop) return JSON.stringify({ error: 'Imovel nao encontrado.' })
 
-    // Valida que property é da org
-    const { data: prop } = await ctx.admin
-      .from('properties')
-      .select('id, title')
-      .eq('id', propertyId)
-      .eq('organization_id', ctx.orgId)
-      .maybeSingle()
-    if (!prop) {
-      return JSON.stringify({ error: 'Imóvel não encontrado. Use search_properties antes pra pegar o ID correto.' })
+    const integ = await getOrgCalIntegration(ctx.admin, ctx.orgId)
+    let gcalToken: string | null = null
+    if (integ) gcalToken = await refreshGoogleToken(ctx.admin, integ)
+
+    const conflictInternal = await hasConflictingAppointment(ctx.admin, ctx.orgId, propertyId, date, 30)
+    const conflictGoogle = gcalToken && integ ? await isBusyOnGoogle(gcalToken, integ.calendar_id, date, 30) : false
+    if (conflictInternal || conflictGoogle) {
+      const suggested = await suggestAvailableSlots(ctx.admin, ctx.orgId, propertyId, date, gcalToken, integ?.calendar_id ?? null, 3, 30)
+      return JSON.stringify({ error: 'conflict', reason: conflictGoogle ? 'Horario ocupado na agenda do corretor.' : 'Imovel ja tem visita proxima.', privacy_note: 'NAO revele detalhes.', suggested_slots: suggested, instructions_for_ai: 'Oferece alternativas, pergunta qual prefere.' })
     }
 
-    // Verifica conflito no mesmo imovel (sem expor detalhes do agendamento existente)
-    const conflict = await hasConflictingAppointment(ctx.admin, ctx.orgId, propertyId, date, 30)
-    if (conflict) {
-      const suggested = await suggestAvailableSlots(ctx.admin, ctx.orgId, propertyId, date, 3, 30)
-      return JSON.stringify({
-        error: 'conflict',
-        reason: 'Este imovel ja possui uma visita agendada em horario proximo (janela de 30min).',
-        privacy_note: 'NAO revele detalhes (lead, corretor, horario exato) do agendamento existente ao lead. Apenas diga que o horario nao esta disponivel e ofereca alternativas.',
-        suggested_slots: suggested,
-        instructions_for_ai: 'Peca desculpas brevemente, diga que aquele horario ja esta ocupado e oferece as alternativas em suggested_slots (formate-as em horarios legiveis BRT). Pergunte qual prefere.',
-      })
-    }
-
-    // Cria appointment
-    const { data: appt, error } = await ctx.admin
-      .from('appointments')
-      .insert({
-        organization_id: ctx.orgId,
-        lead_id: ctx.leadId,
-        property_id: propertyId,
-        scheduled_at: date.toISOString(),
-        notes,
-        status: 'agendado',
-      })
-      .select('id, scheduled_at')
-      .single()
-
+    const { data: leadRow } = await ctx.admin.from('leads').select('name, phone, email').eq('id', ctx.leadId).maybeSingle()
+    const { data: appt, error } = await ctx.admin.from('appointments').insert({ organization_id: ctx.orgId, lead_id: ctx.leadId, property_id: propertyId, scheduled_at: date.toISOString(), notes, status: 'agendado' }).select('id, scheduled_at').single()
     if (error) return JSON.stringify({ error: error.message })
+    // PAUSE bot: agendamento marca fim do atendimento automatizado; corretor assume.
+    await ctx.admin.from('leads').update({ status: 'agendado', bot_paused: true, bot_paused_at: new Date().toISOString(), bot_paused_reason: 'visita_agendada' }).eq('id', ctx.leadId)
 
-    // Atualiza status do lead pra "agendado"
-    await ctx.admin.from('leads').update({ status: 'agendado' }).eq('id', ctx.leadId)
+    let googleEventId: string | null = null
+    let inviteSentToEmail: string | null = null
+    if (gcalToken && integ) {
+      const addr = [prop.location, prop.neighborhood, prop.city].filter(Boolean).join(', ')
+      const summary = `Visita: ${prop.title} (${leadRow?.name ?? leadRow?.phone ?? 'Lead WhatsApp'})`
+      const description = [`Imovel: ${prop.title}`, `Lead: ${leadRow?.name ?? 'Sem nome'} - ${leadRow?.phone ?? ''}`, notes ? `Obs: ${notes}` : null, '', 'Agendado automaticamente pelo bot WhatsApp.'].filter(Boolean).join('\n')
+      const attendeeEmail = leadRow?.email && isValidEmail(leadRow.email) ? leadRow.email : null
+      const ev = await createGoogleEvent(gcalToken, integ.calendar_id, { summary, description, startAt: date, location: addr, attendeeEmail })
+      if (ev) { googleEventId = ev.id; inviteSentToEmail = attendeeEmail; await ctx.admin.from('appointments').update({ google_event_id: ev.id, google_calendar_user_id: integ.user_id }).eq('id', appt.id) }
+    }
 
-    return JSON.stringify({
-      ok: true,
-      appointment_id: appt.id,
-      property_title: prop.title,
-      scheduled_at: appt.scheduled_at,
-    })
+    // NOTIFICA GRUPO: schedule + bot pausado
+    const gcalTag = googleEventId ? ' — adicionado na agenda do corretor ✅' : ''
+    const inviteTag = inviteSentToEmail ? `\nConvite enviado para: ${inviteSentToEmail}` : ''
+    const msg = `📅 *Visita agendada*\n\nLead: ${leadRow?.name || 'Sem nome'} (+${leadRow?.phone})\nImovel: ${prop.title}\nData: ${fmtBrtShort(date)} BRT${gcalTag}${inviteTag}\n\n🤖 Bot pausado. Lead agora e seu. Voce assume as proximas mensagens.`
+    notifyGroup(ctx.admin, ctx.orgId, ctx.instanceName, msg).catch(() => {})
+
+    const aiInstruction = inviteSentToEmail
+      ? `Finalize a conversa: confirme o agendamento em BRT legivel, informe que o convite foi enviado para ${inviteSentToEmail}, agradeca e diga que o corretor entra em contato caso precise. Seja breve, caloroso, mas CONCLUSIVO. Esta e a ULTIMA mensagem automatizada. NUNCA mencione Google Calendar.`
+      : 'Finalize a conversa: confirme o agendamento em BRT legivel, agradeca, e diga que o corretor entra em contato caso precise. Seja breve, caloroso, mas CONCLUSIVO. Esta e a ULTIMA mensagem automatizada. NUNCA pergunte email agora (deveria ter sido antes). NUNCA mencione Google Calendar.'
+
+    return JSON.stringify({ ok: true, appointment_id: appt.id, property_title: prop.title, scheduled_at: appt.scheduled_at, synced_to_agent_calendar: !!googleEventId, invite_sent_to_email: inviteSentToEmail, bot_paused_after_this: true, ai_instruction: aiInstruction })
   }
-
   if (toolName === 'reschedule_visit') {
     const apptId = String(input.appointment_id ?? '').trim()
     const newAt = String(input.new_scheduled_at ?? '').trim()
-    if (!apptId || !newAt) {
-      return JSON.stringify({ error: 'appointment_id e new_scheduled_at obrigatórios' })
-    }
+    if (!apptId || !newAt) return JSON.stringify({ error: 'campos obrigatorios' })
     const date = parseBrtDate(newAt)
-    if (!date || isNaN(date.getTime())) return JSON.stringify({ error: 'Data inválida' })
-    if (date.getTime() < Date.now()) return JSON.stringify({ error: 'Nova data precisa ser no futuro' })
+    if (!date || isNaN(date.getTime())) return JSON.stringify({ error: 'Data invalida' })
+    if (date.getTime() < Date.now()) return JSON.stringify({ error: 'Data precisa ser futura' })
+    const { data: existing } = await ctx.admin.from('appointments').select('id, status, notes, property_id, google_event_id, scheduled_at, properties(title)').eq('id', apptId).eq('organization_id', ctx.orgId).eq('lead_id', ctx.leadId).maybeSingle()
+    if (!existing) return JSON.stringify({ error: 'Nao encontrado' })
+    if (existing.status === 'cancelado' || existing.status === 'realizado') return JSON.stringify({ error: `Ja ${existing.status}` })
 
-    // Valida ownership (org + lead)
-    const { data: existing } = await ctx.admin
-      .from('appointments')
-      .select('id, status, notes, property_id')
-      .eq('id', apptId)
-      .eq('organization_id', ctx.orgId)
-      .eq('lead_id', ctx.leadId)
-      .maybeSingle()
-    if (!existing) return JSON.stringify({ error: 'Agendamento não encontrado ou não pertence a este lead.' })
-    if (existing.status === 'cancelado' || existing.status === 'realizado') {
-      return JSON.stringify({ error: `Agendamento já está ${existing.status} e não pode ser remarcado.` })
-    }
+    const integ = await getOrgCalIntegration(ctx.admin, ctx.orgId)
+    let gcalToken: string | null = null
+    if (integ) gcalToken = await refreshGoogleToken(ctx.admin, integ)
 
-    // Verifica conflito no novo horario (excluindo o proprio appt que esta sendo remarcado)
     if (existing.property_id) {
-      const conflict = await hasConflictingAppointment(ctx.admin, ctx.orgId, existing.property_id as string, date, 30, apptId)
-      if (conflict) {
-        const suggested = await suggestAvailableSlots(ctx.admin, ctx.orgId, existing.property_id as string, date, 3, 30)
-        return JSON.stringify({
-          error: 'conflict',
-          reason: 'O novo horario ja possui outra visita agendada proxima no mesmo imovel.',
-          privacy_note: 'NAO revele detalhes do outro agendamento. Apenas ofereca as alternativas.',
-          suggested_slots: suggested,
-          instructions_for_ai: 'Diga que aquele horario nao esta disponivel e oferece as alternativas em suggested_slots. Pergunte qual prefere.',
-        })
+      const conflictInternal = await hasConflictingAppointment(ctx.admin, ctx.orgId, existing.property_id as string, date, 30, apptId)
+      const conflictGoogle = gcalToken && integ ? await isBusyOnGoogle(gcalToken, integ.calendar_id, date, 30) : false
+      if (conflictInternal || conflictGoogle) {
+        const suggested = await suggestAvailableSlots(ctx.admin, ctx.orgId, existing.property_id as string, date, gcalToken, integ?.calendar_id ?? null, 3, 30)
+        return JSON.stringify({ error: 'conflict', reason: 'Novo horario ocupado.', privacy_note: 'NAO revele detalhes.', suggested_slots: suggested, instructions_for_ai: 'Oferece alternativas.' })
       }
     }
 
     const stamp = new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })
-    const newNote = input.reason
-      ? `[${stamp}] Remarcado: ${input.reason}`
-      : `[${stamp}] Remarcado pelo lead via WhatsApp`
-    const combinedNotes = existing.notes ? `${existing.notes}\n${newNote}` : newNote
-
-    const { error } = await ctx.admin.from('appointments').update({
-      scheduled_at: date.toISOString(),
-      notes: combinedNotes,
-      status: 'agendado',
-    }).eq('id', apptId)
+    const newNote = input.reason ? `[${stamp}] Remarcado: ${input.reason}` : `[${stamp}] Remarcado via WhatsApp`
+    const combined = existing.notes ? `${existing.notes}\n${newNote}` : newNote
+    const oldDate = new Date(existing.scheduled_at as string)
+    const { error } = await ctx.admin.from('appointments').update({ scheduled_at: date.toISOString(), notes: combined, status: 'agendado' }).eq('id', apptId)
     if (error) return JSON.stringify({ error: error.message })
 
-    return JSON.stringify({
-      ok: true,
-      appointment_id: apptId,
-      new_scheduled_at: date.toISOString(),
-    })
-  }
+    if (existing.google_event_id && gcalToken && integ) await patchGoogleEvent(gcalToken, integ.calendar_id, existing.google_event_id as string, { startAt: date })
 
+    // NOTIFICA GRUPO: reschedule
+    const { data: leadRow } = await ctx.admin.from('leads').select('name, phone').eq('id', ctx.leadId).maybeSingle()
+    const title = (existing.properties as any)?.title ?? 'imovel'
+    const msg = `↻ *Visita remarcada*\n\nLead: ${leadRow?.name || 'Sem nome'} (+${leadRow?.phone})\nImovel: ${title}\nDe: ${fmtBrtShort(oldDate)}\nPara: ${fmtBrtShort(date)} BRT`
+    notifyGroup(ctx.admin, ctx.orgId, ctx.instanceName, msg).catch(() => {})
+
+    return JSON.stringify({ ok: true, appointment_id: apptId, new_scheduled_at: date.toISOString() })
+  }
   if (toolName === 'cancel_visit') {
     const apptId = String(input.appointment_id ?? '').trim()
-    if (!apptId) return JSON.stringify({ error: 'appointment_id obrigatório' })
-
-    const { data: existing } = await ctx.admin
-      .from('appointments')
-      .select('id, status, notes')
-      .eq('id', apptId)
-      .eq('organization_id', ctx.orgId)
-      .eq('lead_id', ctx.leadId)
-      .maybeSingle()
-    if (!existing) return JSON.stringify({ error: 'Agendamento não encontrado.' })
+    if (!apptId) return JSON.stringify({ error: 'appointment_id obrigatorio' })
+    const { data: existing } = await ctx.admin.from('appointments').select('id, status, notes, google_event_id, scheduled_at, properties(title)').eq('id', apptId).eq('organization_id', ctx.orgId).eq('lead_id', ctx.leadId).maybeSingle()
+    if (!existing) return JSON.stringify({ error: 'Nao encontrado' })
     if (existing.status === 'cancelado') return JSON.stringify({ ok: true, already: true })
-    if (existing.status === 'realizado') return JSON.stringify({ error: 'Visita já foi realizada, não pode ser cancelada.' })
-
+    if (existing.status === 'realizado') return JSON.stringify({ error: 'Ja realizada' })
     const stamp = new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })
     const reason = input.reason ? `: ${input.reason}` : ''
-    const note = `[${stamp}] Cancelado pelo lead${reason}`
-    const combinedNotes = existing.notes ? `${existing.notes}\n${note}` : note
-
-    const { error } = await ctx.admin.from('appointments').update({
-      status: 'cancelado',
-      notes: combinedNotes,
-    }).eq('id', apptId)
+    const note = `[${stamp}] Cancelado${reason}`
+    const combined = existing.notes ? `${existing.notes}\n${note}` : note
+    const { error } = await ctx.admin.from('appointments').update({ status: 'cancelado', notes: combined }).eq('id', apptId)
     if (error) return JSON.stringify({ error: error.message })
+
+    if (existing.google_event_id) {
+      const integ = await getOrgCalIntegration(ctx.admin, ctx.orgId)
+      if (integ) { const t = await refreshGoogleToken(ctx.admin, integ); if (t) await deleteGoogleEvent(t, integ.calendar_id, existing.google_event_id as string) }
+    }
+
+    // NOTIFICA GRUPO: cancel
+    const { data: leadRow } = await ctx.admin.from('leads').select('name, phone').eq('id', ctx.leadId).maybeSingle()
+    const title = (existing.properties as any)?.title ?? 'imovel'
+    const msg = `✖ *Visita cancelada*\n\nLead: ${leadRow?.name || 'Sem nome'} (+${leadRow?.phone})\nImovel: ${title}\nEra: ${fmtBrtShort(new Date(existing.scheduled_at as string))} BRT${input.reason ? `\nMotivo: ${input.reason}` : ''}`
+    notifyGroup(ctx.admin, ctx.orgId, ctx.instanceName, msg).catch(() => {})
 
     return JSON.stringify({ ok: true, appointment_id: apptId, status: 'cancelado' })
   }
-
+  if (toolName === 'send_invite_by_email') {
+    const apptId = String(input.appointment_id ?? '').trim()
+    const email = String(input.email ?? '').trim().toLowerCase()
+    if (!apptId || !email) return JSON.stringify({ error: 'appointment_id e email obrigatorios' })
+    if (!isValidEmail(email)) return JSON.stringify({ error: 'Email invalido. Peca novamente ao lead.' })
+    const { data: appt } = await ctx.admin.from('appointments').select('id, google_event_id, status').eq('id', apptId).eq('organization_id', ctx.orgId).eq('lead_id', ctx.leadId).maybeSingle()
+    if (!appt) return JSON.stringify({ error: 'Agendamento nao encontrado' })
+    if (appt.status === 'cancelado') return JSON.stringify({ error: 'Agendamento cancelado; nao ha como enviar convite.' })
+    if (!appt.google_event_id) return JSON.stringify({ error: 'Agendamento nao esta sincronizado com a agenda do corretor. Nao e possivel enviar convite por email.' })
+    const integ = await getOrgCalIntegration(ctx.admin, ctx.orgId)
+    if (!integ) return JSON.stringify({ error: 'Agenda do corretor nao conectada.' })
+    const token = await refreshGoogleToken(ctx.admin, integ)
+    if (!token) return JSON.stringify({ error: 'Falha ao autenticar na agenda do corretor.' })
+    const sent = await addAttendeeToGoogleEvent(token, integ.calendar_id, appt.google_event_id as string, email)
+    if (!sent) return JSON.stringify({ error: 'Falha ao enviar o convite. Tente novamente mais tarde.' })
+    await ctx.admin.from('leads').update({ email }).eq('id', ctx.leadId)
+    return JSON.stringify({ ok: true, email, ai_instruction: `Confirme ao lead que o convite foi enviado para ${email} e peca pra verificar a caixa de entrada e o spam.` })
+  }
   return JSON.stringify({ error: `Unknown tool: ${toolName}` })
 }
 
 async function callBedrock(body: Record<string, unknown>) {
-  const client = new BedrockRuntimeClient({
-    region: Deno.env.get('AWS_REGION') || 'us-east-1',
-    credentials: {
-      accessKeyId: Deno.env.get('AWS_ACCESS_KEY_ID')!,
-      secretAccessKey: Deno.env.get('AWS_SECRET_ACCESS_KEY')!,
-    },
-  })
+  const client = new BedrockRuntimeClient({ region: Deno.env.get('AWS_REGION') || 'us-east-1', credentials: { accessKeyId: Deno.env.get('AWS_ACCESS_KEY_ID')!, secretAccessKey: Deno.env.get('AWS_SECRET_ACCESS_KEY')! } })
   const modelId = Deno.env.get('BEDROCK_MODEL_ID') || 'anthropic.claude-3-5-haiku-20241022-v1:0'
-  const cmd = new InvokeModelCommand({
-    modelId,
-    contentType: 'application/json',
-    accept: 'application/json',
-    body: new TextEncoder().encode(JSON.stringify(body)),
-  })
+  const cmd = new InvokeModelCommand({ modelId, contentType: 'application/json', accept: 'application/json', body: new TextEncoder().encode(JSON.stringify(body)) })
   const res = await client.send(cmd)
-  const text = new TextDecoder().decode(res.body)
-  return JSON.parse(text)
+  return JSON.parse(new TextDecoder().decode(res.body))
 }
 
-async function generateAiResponse(args: {
-  admin: SupabaseClient
-  orgId: string
-  lead: Lead
-  org: Organization
-  config: BotConfig
-  history: { message: string; direction: string }[]
-  lastSearchOutput?: unknown
-  currentImage?: { base64: string; mimetype: string } | null
-  activeAppointments?: Array<{ id: string; scheduled_at: string; status: string; properties?: { title?: string } | null }>
-  isFirstContact?: boolean
-}): Promise<AiResponse | null> {
-  const system = buildSystemPrompt(args.org, args.config, args.lead, args.lastSearchOutput, args.activeAppointments, args.isFirstContact)
+async function generateAiResponse(args: any): Promise<AiResponse | null> {
+  const integ = await getOrgCalIntegration(args.admin, args.orgId)
+  const hasGcal = !!integ
+  const system = buildSystemPrompt(args.org, args.config, args.lead, args.lastSearchOutput, args.activeAppointments, args.isFirstContact, hasGcal)
   const tools = toolDefinitions(args.config)
-
-  // Constrói messages alternando user/assistant a partir do history
   const messages = historyToMessages(args.history)
   if (messages.length === 0) return null
-
-  // Se a mensagem atual tem imagem, injeta no último user message (que é a mensagem atual)
   if (args.currentImage) {
     const last = messages[messages.length - 1]
     if (last && last.role === 'user' && typeof last.content === 'string') {
-      last.content = [
-        {
-          type: 'image',
-          source: {
-            type: 'base64',
-            media_type: args.currentImage.mimetype,
-            data: args.currentImage.base64,
-          },
-        },
-        { type: 'text', text: last.content.replace(/^📷\s*/, '') },
-      ] as any
+      last.content = [{ type: 'image', source: { type: 'base64', media_type: args.currentImage.mimetype, data: args.currentImage.base64 } }, { type: 'text', text: last.content.replace(/^📷\s*/, '') }] as any
     }
   }
 
@@ -1264,156 +705,81 @@ async function generateAiResponse(args: {
   let validationErrorFallback = false
   let lastTextBlock: string | null = null
   let toolExecutedInLoop = false
+  const narrationLike = /^\s*(otimo|ótimo|perfeito|claro|beleza|certo|ok)?[!.,\s]*(deixa eu|vou buscar|vou verificar|aguarde?|um\s+momento|um\s+instante|so um|só um|procurando|buscando|checando|pesquisando)/i
+  const looksLikeNarration = (txt: string) => { if (!txt) return false; const t = txt.trim(); if (t.length < 40) return true; return narrationLike.test(t) && t.length < 200 }
 
-  // Regex de narração (tipo "um momento...") — sinal de resposta incompleta
-  const narrationLike = /^\s*(ótimo|perfeito|claro|beleza|certo|tá|ok)?[!.,\s]*(deixa eu|vou buscar|vou verificar|aguarde?|um\s+momento|um\s+instante|só um|so um|procurando|buscando|checando|pesquisando)/i
-
-  function looksLikeNarration(txt: string): boolean {
-    if (!txt) return false
-    const trimmed = txt.trim()
-    if (trimmed.length < 40) return true
-    return narrationLike.test(trimmed) && trimmed.length < 200
-  }
-
-  // Loop de tool use: até 4 rodadas (Claude chama tool, recebe resultado, continua)
   for (let round = 0; round < 4; round++) {
-    const body: Record<string, unknown> = {
-      anthropic_version: 'bedrock-2023-05-31',
-      max_tokens: 1500,
-      system,
-      messages: accumulatedMessages,
-    }
-    // Desabilita tools no fallback (histórico bagunçado) — responde só texto
+    const body: Record<string, unknown> = { anthropic_version: 'bedrock-2023-05-31', max_tokens: 1500, system, messages: accumulatedMessages }
     if (!validationErrorFallback) body.tools = tools
-
     let resp: any
-    try {
-      resp = await callBedrock(body)
-    } catch (err) {
+    try { resp = await callBedrock(body) } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
-      // Se Claude recusar histórico com tool_use inválido, tenta uma vez sem tools
-      if (!validationErrorFallback && msg.includes('tool_use') && msg.includes('tool_result')) {
-        console.warn('[bot-webhook] retrying without tools due to history validation error')
-        validationErrorFallback = true
-        // Reset pra mensagens só de texto (ignora qualquer tool turn)
-        accumulatedMessages = messages.filter((m) => typeof m.content === 'string')
-        continue
-      }
+      if (!validationErrorFallback && msg.includes('tool_use') && msg.includes('tool_result')) { validationErrorFallback = true; accumulatedMessages = messages.filter((m: any) => typeof m.content === 'string'); continue }
       throw err
     }
     totalTokens += (resp.usage?.input_tokens ?? 0) + (resp.usage?.output_tokens ?? 0)
-
     const textBlock = (resp.content as any[])?.find((b) => b.type === 'text')
     const toolUseBlock = (resp.content as any[])?.find((b) => b.type === 'tool_use')
-
-    console.log('[bot-webhook] round', round, 'stop_reason:', resp.stop_reason,
-      'has_text:', !!textBlock, 'text_len:', textBlock?.text?.length ?? 0,
-      'tool:', toolUseBlock?.name ?? null)
-
     if (textBlock?.text) lastTextBlock = textBlock.text
-
     if (resp.stop_reason === 'tool_use' && toolUseBlock) {
       toolUsed = toolUseBlock.name
       toolExecutedInLoop = true
-      const toolResult = await executeTool(toolUseBlock.name, toolUseBlock.input, {
-        admin: args.admin,
-        orgId: args.orgId,
-        leadId: args.lead.id,
-        maxProps: args.config.max_properties_shown ?? 3,
-      })
-
+      const toolResult = await executeTool(toolUseBlock.name, toolUseBlock.input, { admin: args.admin, orgId: args.orgId, instanceName: args.instanceName, leadId: args.lead.id, maxProps: args.config.max_properties_shown ?? 3 })
       try { lastToolOutput = JSON.parse(toolResult) } catch { lastToolOutput = toolResult }
-
-      // Acumula: assistant completo (com tool_use) + user (tool_result)
-      accumulatedMessages = [
-        ...accumulatedMessages,
-        { role: 'assistant', content: resp.content },
-        {
-          role: 'user',
-          content: [{ type: 'tool_result', tool_use_id: toolUseBlock.id, content: toolResult }],
-        },
-      ]
+      accumulatedMessages = [...accumulatedMessages, { role: 'assistant', content: resp.content }, { role: 'user', content: [{ type: 'tool_result', tool_use_id: toolUseBlock.id, content: toolResult }] }]
       continue
     }
-
-    // Resposta final em texto
     if (textBlock?.text) {
-      // Proteção: se usamos tool e a resposta ainda parece narração ("um momento...")
-      // força uma iteração a mais pra Claude produzir a resposta real
       if (toolExecutedInLoop && looksLikeNarration(textBlock.text) && round < 3) {
-        console.warn('[bot-webhook] round', round, 'returned narration after tool, forcing retry')
-        accumulatedMessages = [
-          ...accumulatedMessages,
-          { role: 'assistant', content: resp.content },
-          { role: 'user', content: 'Perfeito, agora me apresenta os imóveis direto sem dizer "um momento" ou similar. Mostra os resultados com preços, endereço e link.' },
-        ]
+        accumulatedMessages = [...accumulatedMessages, { role: 'assistant', content: resp.content }, { role: 'user', content: 'Otimo, apresenta os imoveis direto com preco, endereco e link. Sem narracao.' }]
         continue
       }
       return { text: sanitizeForWhatsApp(textBlock.text), toolUsed, tokensUsed: totalTokens, toolOutput: lastToolOutput }
     }
-
     break
   }
 
-  // Fallback: se saímos do loop sem retornar, usa o que temos
-  if (lastTextBlock && !looksLikeNarration(lastTextBlock)) {
-    return { text: sanitizeForWhatsApp(lastTextBlock), toolUsed, tokensUsed: totalTokens, toolOutput: lastToolOutput }
-  }
-
-  // Último recurso: se search_properties rodou com resultados, monta resposta manual
+  if (lastTextBlock && !looksLikeNarration(lastTextBlock)) return { text: sanitizeForWhatsApp(lastTextBlock), toolUsed, tokensUsed: totalTokens, toolOutput: lastToolOutput }
   if (toolUsed === 'search_properties' && lastToolOutput && typeof lastToolOutput === 'object') {
     const manual = buildManualPropertyResponse(lastToolOutput, args.config)
     if (manual) return { text: manual, toolUsed, tokensUsed: totalTokens, toolOutput: lastToolOutput }
   }
-
-  console.warn('[bot-webhook] exhausted rounds with no valid final response')
   return null
 }
 
 function buildManualPropertyResponse(output: unknown, config: BotConfig): string | null {
-  const obj = output as { count?: number; properties?: any[]; hint?: string }
+  const obj = output as { properties?: any[] }
   const props = obj.properties ?? []
-  if (props.length === 0) {
-    return 'Não achei imóveis com esses critérios no momento. Posso ampliar a busca? Me diz se topa bairros vizinhos ou ajustar faixa de preço.'
-  }
+  if (props.length === 0) return 'Nao achei imoveis com esses criterios. Posso ampliar a busca?'
   const showLinks = config.show_listing_links
   const lines = props.slice(0, config.max_properties_shown || 3).map((p: any) => {
-    const pieces: string[] = []
-    pieces.push(`*${p.title}*`)
-    const loc = [p.address, p.neighborhood].filter(Boolean).join(', ')
-    if (loc) pieces.push(loc)
+    const pieces: string[] = [`*${p.title}*`]
+    const loc = [p.address, p.neighborhood].filter(Boolean).join(', '); if (loc) pieces.push(loc)
     const priceParts: string[] = []
     if (p.price) priceParts.push(`R$ ${Number(p.price).toLocaleString('pt-BR')} venda`)
-    if (p.rent_price) priceParts.push(`R$ ${Number(p.rent_price).toLocaleString('pt-BR')}/mês`)
-    if (priceParts.length) pieces.push(priceParts.join(' · '))
+    if (p.rent_price) priceParts.push(`R$ ${Number(p.rent_price).toLocaleString('pt-BR')}/mes`)
+    if (priceParts.length) pieces.push(priceParts.join(' / '))
     const specs: string[] = []
     if (p.bedrooms) specs.push(`${p.bedrooms} dorm`)
     if (p.bathrooms) specs.push(`${p.bathrooms} banh`)
     if (p.parking_spots) specs.push(`${p.parking_spots} vaga${p.parking_spots > 1 ? 's' : ''}`)
-    if (p.area_m2) specs.push(`${p.area_m2}m²`)
+    if (p.area_m2) specs.push(`${p.area_m2}m2`)
     if (specs.length) pieces.push(specs.join(', '))
     if (showLinks && p.listing_url) pieces.push(p.listing_url)
     return pieces.join('\n')
   })
-  const intro = props.length === 1 ? 'Encontrei um imóvel que encaixa:' : `Encontrei ${props.length} opções:`
-  return sanitizeForWhatsApp(`${intro}\n\n${lines.join('\n\n')}\n\nQuer agendar uma visita em algum desses?`)
+  const intro = props.length === 1 ? 'Encontrei um imovel:' : `Encontrei ${props.length} opcoes:`
+  return sanitizeForWhatsApp(`${intro}\n\n${lines.join('\n\n')}\n\nQuer agendar visita?`)
 }
 
-function historyToMessages(
-  history: { message: string; direction: string }[],
-): { role: 'user' | 'assistant'; content: string }[] {
-  // Coalesca mensagens consecutivas da mesma direção (Claude exige alternância)
+function historyToMessages(history: { message: string; direction: string }[]) {
   const out: { role: 'user' | 'assistant'; content: string }[] = []
   for (const h of history) {
     const role = h.direction === 'in' ? 'user' : 'assistant'
     const last = out[out.length - 1]
-    if (last && last.role === role) {
-      last.content += '\n' + h.message
-    } else {
-      out.push({ role, content: h.message })
-    }
+    if (last && last.role === role) last.content += '\n' + h.message
+    else out.push({ role, content: h.message })
   }
-  // Deve começar com user
   while (out.length > 0 && out[0].role !== 'user') out.shift()
   return out
 }
