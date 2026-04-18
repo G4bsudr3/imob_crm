@@ -12,7 +12,7 @@ type ProxyResponse = {
   error?: string
 }
 
-async function invokeProxy(action: 'connect' | 'status' | 'disconnect' | 'delete' | 'restart'): Promise<ProxyResponse> {
+async function invokeProxy(action: 'connect' | 'status' | 'disconnect' | 'delete' | 'restart' | 'rotate_webhook_secret'): Promise<ProxyResponse> {
   // 1. Verifica se há sessão
   const { data: sessionData } = await supabase.auth.getSession()
   let session = sessionData.session
@@ -176,6 +176,19 @@ export function useWhatsapp() {
     await fetchInstance()
   }
 
+  async function rotateWebhookSecret(): Promise<{ ok: boolean; error?: string }> {
+    setActionLoading('rotate')
+    setError(null)
+    const res = await invokeProxy('rotate_webhook_secret')
+    setActionLoading(null)
+    if (res.error) {
+      setError(res.error)
+      return { ok: false, error: res.error }
+    }
+    await fetchInstance()
+    return { ok: true }
+  }
+
   function cancelQr() {
     stopPolling()
     stopQrRefresh()
@@ -193,6 +206,7 @@ export function useWhatsapp() {
     reset,
     restart,
     cancelQr,
+    rotateWebhookSecret,
     refetch: fetchInstance,
   }
 }

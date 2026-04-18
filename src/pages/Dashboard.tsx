@@ -1,11 +1,12 @@
 import {
-  Users, Calendar, Home, TrendingUp, TrendingDown, ArrowRight, Plus, MapPin,
+  Users, Calendar, Home, TrendingUp, TrendingDown, ArrowRight, Plus, MapPin, Bot, BotOff, Wifi, WifiOff,
   type LucideIcon,
 } from 'lucide-react'
 import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer } from 'recharts'
 import { Link } from 'react-router-dom'
 import { useDashboard } from '../hooks/useDashboard'
 import { useProfile } from '../hooks/useProfile'
+import { useWhatsapp } from '../hooks/useWhatsapp'
 import { Badge } from '../components/ui/Badge'
 import { Card } from '../components/ui/Card'
 import { Button } from '../components/ui/Button'
@@ -40,6 +41,8 @@ function greeting(name: string | null | undefined): string {
 export function Dashboard() {
   const { stats, loading } = useDashboard()
   const { profile } = useProfile()
+  const { instance } = useWhatsapp()
+  const waStatus = instance?.status ?? 'disconnected'
 
   return (
     <div className="space-y-8">
@@ -61,6 +64,9 @@ export function Dashboard() {
           </>
         }
       />
+
+      {/* Bot status */}
+      <BotStatusCard status={waStatus} connectedNumber={instance?.connected_number ?? null} />
 
       {/* KPIs */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
@@ -266,6 +272,55 @@ export function Dashboard() {
         </div>
       </Card>
     </div>
+  )
+}
+
+function BotStatusCard({ status, connectedNumber }: { status: string; connectedNumber: string | null }) {
+  if (status === 'connected') {
+    return (
+      <Card className="p-4 flex items-center gap-3 border border-success/30 bg-success-soft/40">
+        <div className="h-10 w-10 rounded-full bg-success/20 text-success flex items-center justify-center shrink-0">
+          <Bot size={18} />
+        </div>
+        <div className="flex-1 min-w-0">
+          <p className="text-sm font-semibold tracking-tight">Bot WhatsApp ativo</p>
+          <p className="text-[11px] text-muted-foreground truncate">
+            {connectedNumber ? `Respondendo no ${connectedNumber}` : 'Respondendo mensagens automaticamente'}
+          </p>
+        </div>
+      </Card>
+    )
+  }
+  if (status === 'qrcode' || status === 'connecting') {
+    return (
+      <Card className="p-4 flex items-center gap-3 border border-warning/30 bg-warning-soft/40">
+        <div className="h-10 w-10 rounded-full bg-warning/20 text-warning flex items-center justify-center shrink-0">
+          <Wifi size={18} />
+        </div>
+        <div className="flex-1 min-w-0">
+          <p className="text-sm font-semibold tracking-tight">Conectando WhatsApp...</p>
+          <p className="text-[11px] text-muted-foreground">Escaneie o QR code em Configuração do bot.</p>
+        </div>
+        <Link to="/bot">
+          <Button size="sm" variant="outline" rightIcon={<ArrowRight size={12} />}>Abrir</Button>
+        </Link>
+      </Card>
+    )
+  }
+  // disconnected
+  return (
+    <Card className="p-4 flex items-center gap-3 border border-warning/30 bg-warning-soft/40">
+      <div className="h-10 w-10 rounded-full bg-muted text-muted-foreground flex items-center justify-center shrink-0">
+        <BotOff size={18} />
+      </div>
+      <div className="flex-1 min-w-0">
+        <p className="text-sm font-semibold tracking-tight">Bot desconectado</p>
+        <p className="text-[11px] text-muted-foreground">Conecte o WhatsApp da imobiliária pra começar a receber leads automaticamente.</p>
+      </div>
+      <Link to="/bot">
+        <Button size="sm" variant="primary" leftIcon={<WifiOff size={12} />}>Conectar</Button>
+      </Link>
+    </Card>
   )
 }
 

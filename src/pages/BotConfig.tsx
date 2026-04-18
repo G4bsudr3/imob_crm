@@ -647,11 +647,21 @@ function ConexaoTab({ canEdit }: { canEdit: boolean }) {
   const toast = useToast()
   const confirm = useConfirm()
   const { profile } = useProfile()
-  const { instance, qrcode, loading, actionLoading, error, connect, disconnect, reset, cancelQr } = useWhatsapp()
+  const { instance, qrcode, loading, actionLoading, error, connect, disconnect, reset, cancelQr, rotateWebhookSecret } = useWhatsapp()
 
   const status = instance?.status ?? 'disconnected'
   const connectedNumber = instance?.connected_number ?? null
   const adminPhoneSet = !!profile?.phone?.trim()
+  const webhookSecretMissing = status === 'connected' && !(instance as unknown as { webhook_secret?: string | null })?.webhook_secret
+  const [rotating, setRotating] = useState(false)
+
+  async function handleRotateSecret() {
+    setRotating(true)
+    const res = await rotateWebhookSecret()
+    setRotating(false)
+    if (res.ok) toast.success('Segurança ativada', 'Seu webhook agora valida cada mensagem com secret único.')
+    else toast.error('Falha ao ativar', res.error || 'Tente desconectar e reconectar.')
+  }
 
   async function handleDisconnect() {
     const ok = await confirm({
@@ -721,6 +731,20 @@ function ConexaoTab({ canEdit }: { canEdit: boolean }) {
   if (status === 'connected') {
     return (
       <div className="space-y-4">
+        {webhookSecretMissing && canEdit && (
+          <Callout variant="warning" icon={AlertCircle}>
+            <div className="space-y-2">
+              <p className="font-medium text-sm">Ative a validação de segurança do webhook</p>
+              <p className="text-xs leading-relaxed">
+                Sua conexão foi feita antes do rollout de webhook secret. Isso permite, em teoria, que mensagens forjadas sejam aceitas. Clique pra gerar um secret único e reconfigurar o webhook na Evolution API — sem desconectar o WhatsApp.
+              </p>
+              <Button size="sm" onClick={handleRotateSecret} loading={rotating} variant="primary">
+                Ativar segurança
+              </Button>
+            </div>
+          </Callout>
+        )}
+
         <SubSection title="WhatsApp conectado">
           <div className="flex items-center gap-4">
             <div className="h-12 w-12 rounded-full bg-success-soft text-success flex items-center justify-center">

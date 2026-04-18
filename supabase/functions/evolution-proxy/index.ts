@@ -231,6 +231,24 @@ Deno.serve(async (req) => {
       return jsonResponse({ ok: true, info, members: memberPhones, i_am_member: iAmMember, my_phone: myPhone })
     }
 
+    if (action === 'rotate_webhook_secret') {
+      if (!isAdminOrManager) return jsonResponse({ error: 'Apenas admin/manager' }, 403)
+      // Gera novo secret, tenta atualizar Evolution API. So persiste se a atualizacao passar.
+      const newSecret = generateWebhookSecret()
+      const webhookUrl = `${supabaseUrl}/functions/v1/bot-webhook?s=${newSecret}`
+      let setOk = false
+      for (const endpoint of [`${evoUrl}/webhook/set/${instanceName}`, `${evoUrl}/webhook/${instanceName}`]) {
+        try {
+          const r = await fetch(endpoint, { method: 'POST', headers: evoHeaders,
+            body: JSON.stringify({ webhook: { enabled: true, url: webhookUrl, byEvents: false, base64: false, events: ['MESSAGES_UPSERT', 'CONNECTION_UPDATE'] } }) })
+          if (r.ok) { setOk = true; break }
+        } catch { /* tenta proximo */ }
+      }
+      if (!setOk) return jsonResponse({ error: 'Evolution nao aceitou atualizacao do webhook. Tente reconectar (desconectar + escanear QR novamente).' }, 502)
+      await adminClient.from('whatsapp_instances').update({ webhook_secret: newSecret }).eq('organization_id', orgId)
+      return jsonResponse({ ok: true })
+    }
+
     if (action === 'remove_group_member') {
       if (!isAdminOrManager) return jsonResponse({ error: 'Apenas admin/manager' }, 403)
       const phoneRaw = body.phone as string

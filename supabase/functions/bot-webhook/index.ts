@@ -296,7 +296,9 @@ Deno.serve(async (req) => {
   }
 
   const { data: org } = await admin.from('organizations').select('legal_name, trade_name, website, email, phone, address_city, address_state').eq('id', orgId).single()
-  const { data: history } = await admin.from('conversations').select('message, direction').eq('lead_id', lead.id).order('sent_at', { ascending: false }).limit(20)
+  // Limita historico a 10 mensagens recentes (antes: 20). Reduz custo Bedrock + latencia
+  // em conversas longas. Claude ja tem o sistema + perfil do lead, nao precisa de todo o historico.
+  const { data: history } = await admin.from('conversations').select('message, direction').eq('lead_id', lead.id).order('sent_at', { ascending: false }).limit(10)
   const orderedHistory = (history ?? []).reverse()
   const isFirstContact = orderedHistory.filter((h) => h.direction === 'out').length === 0
 
