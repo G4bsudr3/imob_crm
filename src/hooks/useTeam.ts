@@ -67,29 +67,45 @@ export function useTeam() {
   }
 
   async function removeMember(userId: string) {
-    // Best-effort: remove do grupo de alertas do WhatsApp antes de desvincular da org.
-    // Se falhar (telefone nao configurado, bot nao conectado, grupo nao criado, etc), segue mesmo assim.
+    // Ordem importa:
+    // 1) Invalida TODOS os JWTs do usuario (senao ele continua com sessao valida ate expirar)
+    // 2) Best-effort remove do grupo de alertas do WhatsApp
+    // 3) Desvincula da org (organization_id=null, role=user)
     const member = members.find((m) => m.id === userId)
     const memberPhone = (member as unknown as { phone?: string | null })?.phone
-    if (memberPhone) {
+    const { data: sess } = await supabase.auth.getSession()
+    const token = sess.session?.access_token
+    const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
+    const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string
+
+    if (token) {
+      // Revoke sessions (critico, bloqueia remocao se falhar)
       try {
-        const { data: sess } = await supabase.auth.getSession()
-        const token = sess.session?.access_token
-        if (token) {
-          await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/evolution-proxy`, {
+        const res = await fetch(`${supabaseUrl}/functions/v1/admin-user-ops`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}`, apikey: anonKey, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'revoke_sessions', user_id: userId }),
+        })
+        if (!res.ok) {
+          const j = await res.json().catch(() => ({}))
+          return { error: `Falha ao revogar sessao: ${j.error || res.status}` }
+        }
+      } catch (e) {
+        return { error: `Falha ao revogar sessao: ${e instanceof Error ? e.message : String(e)}` }
+      }
+
+      // Kick do grupo WhatsApp (best-effort)
+      if (memberPhone) {
+        try {
+          await fetch(`${supabaseUrl}/functions/v1/evolution-proxy`, {
             method: 'POST',
-            headers: {
-              Authorization: `Bearer ${token}`,
-              apikey: import.meta.env.VITE_SUPABASE_ANON_KEY as string,
-              'Content-Type': 'application/json',
-            },
+            headers: { Authorization: `Bearer ${token}`, apikey: anonKey, 'Content-Type': 'application/json' },
             body: JSON.stringify({ action: 'remove_group_member', phone: memberPhone }),
           })
-        }
-      } catch {
-        // ignora falha; nao bloqueia remocao do time
+        } catch { /* ignora */ }
       }
     }
+
     const { error } = await supabase
       .from('profiles')
       .update({ organization_id: null, role: 'user' })

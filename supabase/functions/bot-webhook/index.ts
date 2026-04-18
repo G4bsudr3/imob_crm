@@ -272,12 +272,15 @@ Deno.serve(async (req) => {
     return ok()
   }
 
+  // Burst por lead (= por phone, ja que UNIQUE(org_id, phone)): flood protection.
   const tenSecAgo = new Date(Date.now() - 10_000).toISOString()
   const { count: recentCount } = await admin.from('conversations').select('id', { count: 'exact', head: true }).eq('lead_id', lead.id).eq('direction', 'in').gte('sent_at', tenSecAgo)
   if ((recentCount ?? 0) > 5) return ok()
 
+  // Cap diario por organizacao: conta TODAS as chamadas AI (tool-use ou nao).
+  // Antes contava so as que usaram tool => respostas de texto puro bypassavam o limite e geravam custo.
   const dayAgo = new Date(Date.now() - 86_400_000).toISOString()
-  const { count: dailyCount } = await admin.from('conversations').select('id', { count: 'exact', head: true }).eq('organization_id', orgId).eq('direction', 'out').not('ai_tool_used', 'is', null).gte('sent_at', dayAgo)
+  const { count: dailyCount } = await admin.from('conversations').select('id', { count: 'exact', head: true }).eq('organization_id', orgId).eq('direction', 'out').gt('ai_tokens_used', 0).gte('sent_at', dayAgo)
   if ((dailyCount ?? 0) >= 300) { const msg = 'Alta demanda no momento. Um corretor vai te responder em breve.'; await sendWhatsApp(instanceName, phone, msg).catch(()=>{}); await admin.from('conversations').insert({ lead_id: lead.id, organization_id: orgId, message: msg, direction: 'out' }); return ok() }
 
   if (config.business_hours_enabled) {
