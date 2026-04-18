@@ -155,20 +155,27 @@ function ActivityTab() {
   const orgId = profile?.organization_id
   const [rows, setRows] = useState<AuditRow[] | null>(null)
   const [loading, setLoadingState] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
     async function load() {
-      if (!orgId) return
+      if (!orgId) { setLoadingState(false); return }
       setLoadingState(true)
-      const { data } = await supabase
+      setLoadError(null)
+      const { data, error } = await supabase
         .from('audit_logs')
         .select('*')
         .eq('organization_id', orgId)
         .order('created_at', { ascending: false })
         .limit(100)
       if (cancelled) return
-      setRows((data ?? []) as AuditRow[])
+      if (error) {
+        setLoadError(error.message)
+        setRows([])
+      } else {
+        setRows((data ?? []) as AuditRow[])
+      }
       setLoadingState(false)
     }
     load()
@@ -176,6 +183,19 @@ function ActivityTab() {
   }, [orgId])
 
   if (loading) return <SkeletonTabContent />
+  if (loadError) {
+    return (
+      <Card className="p-6 text-sm">
+        <div className="flex items-start gap-2 text-destructive">
+          <AlertCircle size={14} className="mt-0.5 shrink-0" />
+          <div>
+            <p className="font-medium">Erro ao carregar atividade</p>
+            <p className="text-xs text-muted-foreground mt-0.5">{loadError}</p>
+          </div>
+        </div>
+      </Card>
+    )
+  }
 
   if (!rows || rows.length === 0) {
     return (

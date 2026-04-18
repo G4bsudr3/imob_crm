@@ -38,6 +38,10 @@ export function LeadDetail({ lead, onClose, onSaved }: Props) {
   const [saved, setSaved] = useState(false)
   const [botPaused, setBotPaused] = useState(lead.bot_paused ?? false)
   const [togglingBot, setTogglingBot] = useState(false)
+  // Sincroniza com updates do lead via realtime (pai reabre/rehidrata via useLeads).
+  // Sem isso, se `lead.bot_paused` muda fora do Detail (ex: bot pausou automaticamente ao agendar),
+  // o card ficaria com valor antigo.
+  useEffect(() => { setBotPaused(lead.bot_paused ?? false) }, [lead.bot_paused])
   const pauseReasonLabel = lead.bot_paused_reason
     ? PAUSE_REASON_LABEL[lead.bot_paused_reason] ?? lead.bot_paused_reason
     : null
