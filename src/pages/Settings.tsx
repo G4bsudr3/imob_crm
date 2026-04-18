@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { User, Building2, Save, CheckCircle, AlertCircle, Mail, Users, UserPlus, X, Shield, Sparkles, Calendar, Link2, Unlink, Bell } from 'lucide-react'
+import { User, Building2, Save, CheckCircle, AlertCircle, Mail, Users, UserPlus, X, Shield, Sparkles, Calendar, Link2, Unlink, Bell, Activity } from 'lucide-react'
 import { PageHeader } from '../components/ui/PageHeader'
 import { Card } from '../components/ui/Card'
 import { Button } from '../components/ui/Button'
@@ -32,7 +32,7 @@ function SkeletonTabContent({ rows = 3 }: { rows?: number }) {
   )
 }
 
-type Tab = 'pessoal' | 'empresa' | 'equipe' | 'integracoes'
+type Tab = 'pessoal' | 'empresa' | 'equipe' | 'integracoes' | 'atividade'
 
 const ROLE_LABELS: Record<string, string> = {
   user: 'Corretor',
@@ -88,6 +88,7 @@ export function Settings() {
     { id: 'empresa', label: 'Empresa', icon: Building2 },
     ...(isAdmin ? [{ id: 'equipe' as Tab, label: 'Equipe', icon: Users }] : []),
     ...(isAdmin ? [{ id: 'integracoes' as Tab, label: 'Integrações', icon: Link2 }] : []),
+    ...(isAdmin ? [{ id: 'atividade' as Tab, label: 'Atividade', icon: Activity }] : []),
   ]
 
   return (
@@ -119,8 +120,121 @@ export function Settings() {
       {tab === 'empresa' && <CompanyTab />}
       {tab === 'equipe' && isAdmin && <TeamTab />}
       {tab === 'integracoes' && isAdmin && <IntegrationsTab />}
+      {tab === 'atividade' && isAdmin && <ActivityTab />}
     </div>
   )
+}
+
+// ============================================================
+// Atividade (audit log)
+// ============================================================
+type AuditRow = {
+  id: number
+  created_at: string
+  actor_id: string | null
+  actor_email: string | null
+  action: string
+  target_type: string | null
+  target_id: string | null
+  metadata: Record<string, unknown> | null
+}
+
+const AUDIT_ACTION_LABELS: Record<string, string> = {
+  'member.removed': 'Removeu membro',
+  'member.role_changed': 'Alterou role',
+  'member.org_changed': 'Mudou organização do membro',
+  'invitation.created': 'Criou convite',
+  'invitation.revoked': 'Revogou convite',
+  'invitation.accepted': 'Convite aceito',
+  'lead.deleted': 'Excluiu lead',
+  'org.updated': 'Editou dados da empresa',
+}
+
+function ActivityTab() {
+  const { profile } = useProfile()
+  const orgId = profile?.organization_id
+  const [rows, setRows] = useState<AuditRow[] | null>(null)
+  const [loading, setLoadingState] = useState(true)
+
+  useEffect(() => {
+    let cancelled = false
+    async function load() {
+      if (!orgId) return
+      setLoadingState(true)
+      const { data } = await supabase
+        .from('audit_logs')
+        .select('*')
+        .eq('organization_id', orgId)
+        .order('created_at', { ascending: false })
+        .limit(100)
+      if (cancelled) return
+      setRows((data ?? []) as AuditRow[])
+      setLoadingState(false)
+    }
+    load()
+    return () => { cancelled = true }
+  }, [orgId])
+
+  if (loading) return <SkeletonTabContent />
+
+  if (!rows || rows.length === 0) {
+    return (
+      <Card className="p-8 text-center">
+        <Activity size={28} className="text-muted-foreground mx-auto mb-3" />
+        <p className="text-sm font-medium">Sem atividade registrada ainda</p>
+        <p className="text-xs text-muted-foreground mt-1 max-w-sm mx-auto">
+          As ações administrativas (remoções, mudanças de role, convites, edições) aparecerão aqui.
+        </p>
+      </Card>
+    )
+  }
+
+  return (
+    <Card className="overflow-hidden">
+      <div className="px-5 pt-5 pb-3 border-b border-border">
+        <p className="text-sm font-semibold tracking-tight">Atividade recente</p>
+        <p className="text-xs text-muted-foreground mt-0.5">Últimas 100 ações administrativas da sua imobiliária.</p>
+      </div>
+      <ul className="divide-y divide-border max-h-[560px] overflow-y-auto">
+        {rows.map((r) => (
+          <li key={r.id} className="px-5 py-3 text-sm flex items-start gap-3">
+            <div className="h-7 w-7 rounded-full bg-subtle text-muted-foreground flex items-center justify-center shrink-0 mt-0.5">
+              <Activity size={12} />
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="text-sm">
+                <span className="font-medium">{AUDIT_ACTION_LABELS[r.action] ?? r.action}</span>
+                {r.metadata && <AuditMetadataInline meta={r.metadata} action={r.action} />}
+              </p>
+              <p className="text-[11px] text-muted-foreground mt-0.5">
+                {r.actor_email || 'Sistema'} · {formatDate(r.created_at)} {new Date(r.created_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}
+              </p>
+            </div>
+          </li>
+        ))}
+      </ul>
+    </Card>
+  )
+}
+
+function AuditMetadataInline({ meta, action }: { meta: Record<string, unknown>; action: string }) {
+  if (action === 'member.removed') {
+    return <span className="text-muted-foreground"> — {String(meta.member_email ?? meta.member_name ?? '')}</span>
+  }
+  if (action === 'member.role_changed') {
+    return <span className="text-muted-foreground"> — {String(meta.member_email ?? '')}: {String(meta.from ?? '')} → {String(meta.to ?? '')}</span>
+  }
+  if (action === 'invitation.created' || action === 'invitation.revoked' || action === 'invitation.accepted') {
+    return <span className="text-muted-foreground"> — {String(meta.email ?? '')} ({String(meta.role ?? 'user')})</span>
+  }
+  if (action === 'lead.deleted') {
+    return <span className="text-muted-foreground"> — {String(meta.name ?? meta.phone ?? '')}</span>
+  }
+  if (action === 'org.updated') {
+    const fields = Object.keys(meta).join(', ')
+    return <span className="text-muted-foreground"> — campos: {fields}</span>
+  }
+  return null
 }
 
 // ============================================================

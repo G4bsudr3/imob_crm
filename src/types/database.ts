@@ -228,6 +228,32 @@ export type Database = {
         }
         Relationships: []
       }
+      audit_logs: {
+        Row: {
+          id: number
+          organization_id: string | null
+          actor_id: string | null
+          actor_email: string | null
+          action: string
+          target_type: string | null
+          target_id: string | null
+          metadata: Record<string, unknown> | null
+          created_at: string
+        }
+        Insert: {
+          id?: number
+          organization_id?: string | null
+          actor_id?: string | null
+          actor_email?: string | null
+          action: string
+          target_type?: string | null
+          target_id?: string | null
+          metadata?: Record<string, unknown> | null
+          created_at?: string
+        }
+        Update: never
+        Relationships: []
+      }
       whatsapp_instances: {
         Row: {
           organization_id: string
@@ -240,6 +266,10 @@ export type Database = {
           welcome_sent_at: string | null
           created_at: string
           updated_at: string
+          group_jid: string | null
+          group_name: string | null
+          group_created_at: string | null
+          webhook_secret: string | null
         }
         Insert: {
           organization_id: string
@@ -252,6 +282,10 @@ export type Database = {
           welcome_sent_at?: string | null
           created_at?: string
           updated_at?: string
+          group_jid?: string | null
+          group_name?: string | null
+          group_created_at?: string | null
+          webhook_secret?: string | null
         }
         Update: {
           organization_id?: string
@@ -264,6 +298,10 @@ export type Database = {
           welcome_sent_at?: string | null
           created_at?: string
           updated_at?: string
+          group_jid?: string | null
+          group_name?: string | null
+          group_created_at?: string | null
+          webhook_secret?: string | null
         }
         Relationships: [
           {
@@ -450,6 +488,7 @@ export type Database = {
           invited_by: string | null
           accepted_at: string | null
           created_at: string
+          expires_at: string
         }
         Insert: {
           id?: string
@@ -459,6 +498,7 @@ export type Database = {
           invited_by?: string | null
           accepted_at?: string | null
           created_at?: string
+          expires_at?: string
         }
         Update: {
           id?: string
@@ -468,6 +508,7 @@ export type Database = {
           invited_by?: string | null
           accepted_at?: string | null
           created_at?: string
+          expires_at?: string
         }
         Relationships: [
           {

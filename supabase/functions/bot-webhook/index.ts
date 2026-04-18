@@ -227,8 +227,17 @@ Deno.serve(async (req) => {
   const admin = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!)
   if (wamId) { const { data: existing } = await admin.from('conversations').select('id').eq('whatsapp_message_id', wamId).maybeSingle(); if (existing) return ok() }
 
-  const { data: instance } = await admin.from('whatsapp_instances').select('organization_id').eq('instance_name', instanceName).maybeSingle()
+  // Valida secret do webhook: o URL configurado na Evolution API inclui ?s=<secret>.
+  // Se a instancia tem webhook_secret gravado, o valor precisa bater. Instancias antigas
+  // sem secret (pre-rollout) ainda passam para nao quebrar conexoes existentes.
+  const url = new URL(req.url)
+  const providedSecret = url.searchParams.get('s')
+  const { data: instance } = await admin.from('whatsapp_instances').select('organization_id, webhook_secret').eq('instance_name', instanceName).maybeSingle()
   if (!instance) return ok()
+  if (instance.webhook_secret && instance.webhook_secret !== providedSecret) {
+    console.warn('[bot-webhook] secret mismatch for instance', instanceName)
+    return ok()
+  }
   const orgId = instance.organization_id as string
 
   const { data: config } = await admin.from('bot_config').select('*').eq('organization_id', orgId).maybeSingle()
