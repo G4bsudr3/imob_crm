@@ -56,7 +56,11 @@ export function Onboarding() {
     })
     setSaving(false)
     if (error) {
-      setError(error)
+      // Postgres unique violation -> CNPJ ja cadastrado
+      const friendly = /duplicate key|unique constraint|idx_organizations_cnpj_unique/i.test(error)
+        ? 'Ja existe uma imobiliaria cadastrada com esse CNPJ. Se voce faz parte dela, peca um convite ao administrador.'
+        : error
+      setError(friendly)
       return
     }
     setStep('done')

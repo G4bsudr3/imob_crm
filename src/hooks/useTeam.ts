@@ -65,6 +65,29 @@ export function useTeam() {
   }
 
   async function removeMember(userId: string) {
+    // Best-effort: remove do grupo de alertas do WhatsApp antes de desvincular da org.
+    // Se falhar (telefone nao configurado, bot nao conectado, grupo nao criado, etc), segue mesmo assim.
+    const member = members.find((m) => m.id === userId)
+    const memberPhone = (member as unknown as { phone?: string | null })?.phone
+    if (memberPhone) {
+      try {
+        const { data: sess } = await supabase.auth.getSession()
+        const token = sess.session?.access_token
+        if (token) {
+          await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/evolution-proxy`, {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${token}`,
+              apikey: import.meta.env.VITE_SUPABASE_ANON_KEY as string,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ action: 'remove_group_member', phone: memberPhone }),
+          })
+        }
+      } catch {
+        // ignora falha; nao bloqueia remocao do time
+      }
+    }
     const { error } = await supabase
       .from('profiles')
       .update({ organization_id: null, role: 'user' })

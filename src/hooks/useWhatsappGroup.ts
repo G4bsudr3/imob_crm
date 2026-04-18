@@ -41,7 +41,7 @@ export function useWhatsappGroup() {
     return () => { supabase.removeChannel(ch); channelRef.current = null }
   }, [orgId, fetchInfo])
 
-  async function invokeAction(action: string): Promise<{ ok: boolean; error?: string; data?: any }> {
+  async function invokeAction(action: string, extra?: Record<string, unknown>): Promise<{ ok: boolean; error?: string; data?: any }> {
     setBusy(true)
     try {
       const { data: sess } = await supabase.auth.getSession()
@@ -54,7 +54,7 @@ export function useWhatsappGroup() {
           apikey: import.meta.env.VITE_SUPABASE_ANON_KEY as string,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ action }),
+        body: JSON.stringify({ action, ...(extra ?? {}) }),
       })
       const json = await res.json().catch(() => ({}))
       if (!res.ok) return { ok: false, error: json.error || `HTTP ${res.status}`, data: json }
@@ -65,8 +65,27 @@ export function useWhatsappGroup() {
     }
   }
 
+  async function fetchMembersRaw(): Promise<{ ok: boolean; info?: any; error?: string }> {
+    const { data: sess } = await supabase.auth.getSession()
+    const token = sess.session?.access_token
+    if (!token) return { ok: false, error: 'Sessão expirou.' }
+    const res = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/evolution-proxy`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        apikey: import.meta.env.VITE_SUPABASE_ANON_KEY as string,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ action: 'list_group_members' }),
+    })
+    const json = await res.json().catch(() => ({}))
+    if (!res.ok) return { ok: false, error: json.error || `HTTP ${res.status}` }
+    return { ok: true, info: json.info }
+  }
+
   const createGroup = useCallback(() => invokeAction('create_alerts_group'), [])
   const joinGroup = useCallback(() => invokeAction('join_alerts_group'), [])
+  const listMembers = useCallback(fetchMembersRaw, [])
 
-  return { info, loading, busy, createGroup, joinGroup, refetch: fetchInfo }
+  return { info, loading, busy, createGroup, joinGroup, listMembers, refetch: fetchInfo }
 }

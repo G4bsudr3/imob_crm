@@ -239,17 +239,50 @@ function PersonalTab() {
 // ============================================================
 // Card "Grupo de alertas" (visível pra qualquer usuário no PerfilTab)
 // ============================================================
+function normalizeBrPhone(raw: string): string | null {
+  const digits = (raw || '').replace(/\D/g, '')
+  if (!digits) return null
+  if (digits.startsWith('55') && (digits.length === 12 || digits.length === 13)) return digits
+  if (digits.length === 10 || digits.length === 11) return '55' + digits
+  return null
+}
+
 function AlertsGroupJoinCard() {
   const toast = useToast()
   const { profile } = useProfile()
-  const { info, loading, busy, joinGroup } = useWhatsappGroup()
-
-  if (loading) return null
+  const { info, loading, busy, joinGroup, listMembers } = useWhatsappGroup()
+  const [membershipChecking, setMembershipChecking] = useState(false)
+  const [alreadyInGroup, setAlreadyInGroup] = useState<boolean | null>(null)
 
   const hasGroup = !!info?.group_jid
   const hasPhone = !!profile?.phone?.trim()
   const isConnected = info?.instance_status === 'connected'
 
+  useEffect(() => {
+    let cancelled = false
+    async function check() {
+      if (!hasGroup || !hasPhone) { setAlreadyInGroup(null); return }
+      setMembershipChecking(true)
+      const res = await listMembers()
+      if (cancelled) return
+      setMembershipChecking(false)
+      if (!res.ok || !res.info) { setAlreadyInGroup(null); return }
+      const myPhone = normalizeBrPhone(profile?.phone ?? '')
+      if (!myPhone) { setAlreadyInGroup(null); return }
+      // Evolution API returns participants like [{ id: "5511...@s.whatsapp.net", admin: "admin"|null }]
+      const participants: Array<{ id?: string }> =
+        (res.info?.participants as Array<{ id?: string }>) ||
+        (res.info?.data?.participants as Array<{ id?: string }>) ||
+        []
+      const found = participants.some((p) => (p?.id || '').split('@')[0] === myPhone)
+      setAlreadyInGroup(found)
+    }
+    check()
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasGroup, hasPhone, profile?.phone])
+
+  if (loading) return null
   // Se o WhatsApp nem está conectado, nem mostra esse card
   if (!isConnected) return null
 
@@ -259,8 +292,10 @@ function AlertsGroupJoinCard() {
       return
     }
     const res = await joinGroup()
-    if (res.ok) toast.success('Adicionado ao grupo', 'Confira seu WhatsApp.')
-    else toast.error('Não foi possível entrar no grupo', res.error || 'Erro desconhecido')
+    if (res.ok) {
+      toast.success('Adicionado ao grupo', 'Confira seu WhatsApp.')
+      setAlreadyInGroup(true)
+    } else toast.error('Não foi possível entrar no grupo', res.error || 'Erro desconhecido')
   }
 
   if (!hasGroup) {
@@ -308,14 +343,22 @@ function AlertsGroupJoinCard() {
       )}
 
       <div className="pt-2 border-t border-border">
-        <Button
-          leftIcon={<Bell size={14} />}
-          onClick={handleJoin}
-          loading={busy}
-          disabled={!hasPhone}
-        >
-          Entrar no grupo
-        </Button>
+        {alreadyInGroup === true ? (
+          <div className="flex items-center gap-2 text-xs text-success">
+            <CheckCircle size={14} /> Você já está no grupo.
+          </div>
+        ) : membershipChecking && alreadyInGroup === null ? (
+          <p className="text-[11px] text-muted-foreground">Verificando se você já está no grupo...</p>
+        ) : (
+          <Button
+            leftIcon={<Bell size={14} />}
+            onClick={handleJoin}
+            loading={busy}
+            disabled={!hasPhone}
+          >
+            Entrar no grupo
+          </Button>
+        )}
       </div>
     </SubSection>
   )
@@ -397,8 +440,11 @@ function CompanyTab() {
     })
     setSaving(false)
     if (error) {
-      setError(error)
-      toast.error('Erro ao salvar empresa', error)
+      const friendly = /duplicate key|unique constraint|idx_organizations_cnpj_unique/i.test(error)
+        ? 'Ja existe uma imobiliaria cadastrada com esse CNPJ.'
+        : error
+      setError(friendly)
+      toast.error('Erro ao salvar empresa', friendly)
       return
     }
     setSaved(true)
