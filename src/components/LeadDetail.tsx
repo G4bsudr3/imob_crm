@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { X, Save, MessageSquare, User, Calendar, Phone } from 'lucide-react'
+import { X, Save, MessageSquare, User, Calendar, Phone, Bot, BotOff } from 'lucide-react'
 import { supabase } from '../lib/supabase'
 import type { Lead, Conversation } from '../types/database'
 import { formatDate, formatTime } from '../lib/utils'
@@ -8,6 +8,11 @@ import { Field, Input, Textarea } from './ui/Input'
 import { Card } from './ui/Card'
 import { useToast } from './ui/Toast'
 import { cn } from '../lib/utils'
+
+const PAUSE_REASON_LABEL: Record<string, string> = {
+  visita_agendada: 'visita agendada',
+  escalado_humano: 'lead pediu atendente humano',
+}
 
 type Props = {
   lead: Lead
@@ -31,6 +36,11 @@ export function LeadDetail({ lead, onClose, onSaved }: Props) {
   const [loadingConv, setLoadingConv] = useState(true)
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
+  const [botPaused, setBotPaused] = useState(lead.bot_paused ?? false)
+  const [togglingBot, setTogglingBot] = useState(false)
+  const pauseReasonLabel = lead.bot_paused_reason
+    ? PAUSE_REASON_LABEL[lead.bot_paused_reason] ?? lead.bot_paused_reason
+    : null
 
   useEffect(() => {
     supabase
@@ -43,6 +53,23 @@ export function LeadDetail({ lead, onClose, onSaved }: Props) {
         setLoadingConv(false)
       })
   }, [lead.id])
+
+  async function handleToggleBot() {
+    const next = !botPaused
+    setTogglingBot(true)
+    const patch = next
+      ? { bot_paused: true, bot_paused_at: new Date().toISOString(), bot_paused_reason: 'manual' }
+      : { bot_paused: false, bot_paused_at: null, bot_paused_reason: null }
+    const { error } = await supabase.from('leads').update(patch).eq('id', lead.id)
+    setTogglingBot(false)
+    if (error) {
+      toast.error(next ? 'Erro ao pausar bot' : 'Erro ao reativar bot', error.message)
+      return
+    }
+    setBotPaused(next)
+    toast.success(next ? 'Bot pausado' : 'Bot reativado', next ? 'Lead agora sob atendimento humano.' : 'Bot volta a responder nas proximas mensagens.')
+    onSaved()
+  }
 
   async function handleSave() {
     setSaving(true)
@@ -92,6 +119,46 @@ export function LeadDetail({ lead, onClose, onSaved }: Props) {
         </div>
 
         <div className="p-5 space-y-5">
+          {/* bot status */}
+          <Card
+            className={cn(
+              'overflow-hidden border',
+              botPaused ? 'border-warning/40 bg-warning-soft' : 'border-border',
+            )}
+          >
+            <div className="p-4 flex items-center gap-3">
+              <div
+                className={cn(
+                  'h-9 w-9 rounded-full flex items-center justify-center shrink-0',
+                  botPaused ? 'bg-warning/20 text-warning' : 'bg-success-soft text-success',
+                )}
+              >
+                {botPaused ? <BotOff size={16} /> : <Bot size={16} />}
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-semibold tracking-tight">
+                  {botPaused ? 'Bot pausado (atendimento humano)' : 'Bot ativo'}
+                </p>
+                <p className="text-[11px] text-muted-foreground truncate">
+                  {botPaused
+                    ? pauseReasonLabel
+                      ? `Motivo: ${pauseReasonLabel}. Voce responde pelo WhatsApp.`
+                      : 'Voce responde pelo WhatsApp.'
+                    : 'Bot responde automaticamente as mensagens do lead.'}
+                </p>
+              </div>
+              <Button
+                onClick={handleToggleBot}
+                loading={togglingBot}
+                size="sm"
+                variant={botPaused ? 'primary' : 'ghost'}
+                leftIcon={botPaused ? <Bot size={12} /> : <BotOff size={12} />}
+              >
+                {botPaused ? 'Reativar bot' : 'Pausar bot'}
+              </Button>
+            </div>
+          </Card>
+
           {/* dados do lead */}
           <Card className="overflow-hidden">
             <div className="px-5 pt-5 pb-3 border-b border-border flex items-center gap-2">

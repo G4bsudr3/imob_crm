@@ -341,6 +341,11 @@ export type Database = {
           organization_id: string | null
           last_message_at: string | null
           source: string | null
+          email: string | null
+          name_confirmed: boolean
+          bot_paused: boolean
+          bot_paused_at: string | null
+          bot_paused_reason: string | null
         }
         Insert: {
           assigned_to?: string | null
@@ -360,6 +365,11 @@ export type Database = {
           organization_id?: string | null
           last_message_at?: string | null
           source?: string | null
+          email?: string | null
+          name_confirmed?: boolean
+          bot_paused?: boolean
+          bot_paused_at?: string | null
+          bot_paused_reason?: string | null
         }
         Update: {
           assigned_to?: string | null
@@ -379,6 +389,11 @@ export type Database = {
           organization_id?: string | null
           last_message_at?: string | null
           source?: string | null
+          email?: string | null
+          name_confirmed?: boolean
+          bot_paused?: boolean
+          bot_paused_at?: string | null
+          bot_paused_reason?: string | null
         }
         Relationships: [
           {
