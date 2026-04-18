@@ -274,8 +274,11 @@ function PersonalTab() {
     })
     setSaving(false)
     if (error) {
-      setError(error)
-      toast.error('Erro ao salvar perfil', error)
+      const friendly = /duplicate key|unique constraint|idx_profiles_phone_per_org/i.test(error)
+        ? 'Esse telefone ja esta cadastrado em outro membro da sua imobiliaria.'
+        : error
+      setError(friendly)
+      toast.error('Erro ao salvar perfil', friendly)
       return
     }
     setSaved(true)
@@ -395,15 +398,21 @@ function AlertsGroupJoinCard() {
       const res = await listMembers()
       if (cancelled) return
       setMembershipChecking(false)
-      if (!res.ok || !res.info) { setAlreadyInGroup(null); return }
+      if (!res.ok) { setAlreadyInGroup(null); return }
+      // Servidor ja faz o parse canonico. Fallback para parse local se API antiga.
+      if (typeof res.iAmMember === 'boolean') { setAlreadyInGroup(res.iAmMember); return }
       const myPhone = normalizeBrPhone(profile?.phone ?? '')
       if (!myPhone) { setAlreadyInGroup(null); return }
-      // Evolution API returns participants like [{ id: "5511...@s.whatsapp.net", admin: "admin"|null }]
+      if (res.members && Array.isArray(res.members)) { setAlreadyInGroup(res.members.includes(myPhone)); return }
       const participants: Array<{ id?: string }> =
         (res.info?.participants as Array<{ id?: string }>) ||
         (res.info?.data?.participants as Array<{ id?: string }>) ||
+        (res.info?.groupMetadata?.participants as Array<{ id?: string }>) ||
         []
-      const found = participants.some((p) => (p?.id || '').split('@')[0] === myPhone)
+      const found = participants.some((p) => {
+        const raw = (p?.id || '').split('@')[0].split(':')[0].replace(/\D/g, '')
+        return raw === myPhone
+      })
       setAlreadyInGroup(found)
     }
     check()
@@ -873,18 +882,30 @@ function TeamTab() {
       </SubSection>
 
       {invitations.length > 0 && (
-        <SubSection title={`Convites pendentes (${invitations.length})`} description="Aguardando o cadastro das pessoas convidadas">
+        <SubSection title={`Convites pendentes (${invitations.length})`} description="Aguardando o cadastro das pessoas convidadas. Convites expiram em 7 dias.">
           <ul className="divide-y divide-border -mx-5">
-            {invitations.map((inv) => (
+            {invitations.map((inv) => {
+              const expiresAt = (inv as unknown as { expires_at?: string }).expires_at
+              const expired = expiresAt ? new Date(expiresAt).getTime() < Date.now() : false
+              const expiresSoon = expiresAt && !expired
+                ? new Date(expiresAt).getTime() - Date.now() < 24 * 60 * 60 * 1000
+                : false
+              return (
               <li key={inv.id} className="px-5 py-3 flex items-center justify-between gap-3">
                 <div className="min-w-0 flex-1">
                   <p className="text-sm font-medium truncate">{inv.email}</p>
-                  <p className="text-[11px] text-muted-foreground">
-                    Convidado em {formatDate(inv.created_at)}
+                  <p className="text-[11px] text-muted-foreground flex items-center gap-1.5 flex-wrap">
+                    <span>Convidado em {formatDate(inv.created_at)}</span>
+                    {expiresAt && !expired && (
+                      <span className={cn('tabular', expiresSoon && 'text-warning font-medium')}>
+                        · Expira em {formatDate(expiresAt)}
+                      </span>
+                    )}
+                    {expired && <span className="text-destructive font-medium">· Expirado</span>}
                   </p>
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
-                  <Badge variant={ROLE_VARIANTS[inv.role] ?? 'neutral'}>
+                  <Badge variant={expired ? 'neutral' : (ROLE_VARIANTS[inv.role] ?? 'neutral')}>
                     {ROLE_LABELS[inv.role] ?? inv.role}
                   </Badge>
                   <Button
@@ -898,7 +919,8 @@ function TeamTab() {
                   </Button>
                 </div>
               </li>
-            ))}
+              )
+            })}
           </ul>
         </SubSection>
       )}

@@ -42,10 +42,12 @@ export function useTeam() {
   async function invite(email: string, role: 'user' | 'manager' | 'admin') {
     if (!orgId) return { error: 'Sem organização' }
     const normalized = email.trim().toLowerCase()
+    // Re-convite: renova expires_at (7 dias) e limpa accepted_at. Sem isso, upsert nao refresh-ava a data.
+    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString()
     const { error } = await supabase
       .from('organization_invitations')
       .upsert(
-        { organization_id: orgId, email: normalized, role, invited_by: profile?.id },
+        { organization_id: orgId, email: normalized, role, invited_by: profile?.id, expires_at: expiresAt, accepted_at: null } as any,
         { onConflict: 'organization_id,email' },
       )
     if (!error) await fetchAll()

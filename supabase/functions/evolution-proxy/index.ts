@@ -78,29 +78,43 @@ Deno.serve(async (req) => {
     if (['connect','status','disconnect','delete','restart'].includes(action) && !isAdminOrManager) return jsonResponse({ error: 'Apenas admin/manager' }, 403)
 
     if (action === 'connect') {
-      // Reutiliza secret existente ou gera novo. Evolution API chama webhookUrl?s=<secret>
-      // e bot-webhook valida antes de processar.
+      // Principio: secret no DB deve SEMPRE corresponder ao que Evolution tem configurado.
+      // Se nao conseguimos atualizar Evolution, NAO persistimos secret (senao bot-webhook rejeitaria tudo).
       const { data: existingInst } = await adminClient.from('whatsapp_instances').select('webhook_secret').eq('organization_id', orgId).maybeSingle()
-      const secret = existingInst?.webhook_secret ?? generateWebhookSecret()
-      const webhookUrl = `${supabaseUrl}/functions/v1/bot-webhook?s=${secret}`
+      const existingSecret = existingInst?.webhook_secret ?? null
+      const candidateSecret = existingSecret ?? generateWebhookSecret()
+      const webhookUrl = `${supabaseUrl}/functions/v1/bot-webhook?s=${candidateSecret}`
 
       const stateRes = await fetch(`${evoUrl}/instance/connectionState/${instanceName}`, { headers: evoHeaders })
       let qrcodeBase64: string | null = null
+      let persistedSecret: string | null = existingSecret
+
       if (stateRes.status === 404) {
+        // Nova instancia: cria ja com webhook URL incluindo secret. Se criar ok, secret esta em sincronia.
         const createRes = await fetch(`${evoUrl}/instance/create`, { method: 'POST', headers: evoHeaders,
           body: JSON.stringify({ instanceName, qrcode: true, integration: 'WHATSAPP-BAILEYS', webhook: { url: webhookUrl, byEvents: false, base64: false, events: ['MESSAGES_UPSERT', 'CONNECTION_UPDATE'] } }) })
         if (!createRes.ok) return jsonResponse({ error: `Evolution create falhou: ${await createRes.text()}` }, 502)
         qrcodeBase64 = (await createRes.json()).qrcode?.base64 ?? null
+        persistedSecret = candidateSecret
       } else {
-        // Re-seta o webhook (caso URL tenha mudado, ex: secret novo ou rotacionado)
-        try {
-          await fetch(`${evoUrl}/webhook/set/${instanceName}`, { method: 'POST', headers: evoHeaders,
-            body: JSON.stringify({ webhook: { enabled: true, url: webhookUrl, byEvents: false, base64: false, events: ['MESSAGES_UPSERT', 'CONNECTION_UPDATE'] } }) })
-        } catch (e) { console.warn('[evolution-proxy] webhook/set threw:', e) }
+        // Instancia existente. Se ainda nao tinha secret, tenta configurar via webhook/set.
+        // So persiste o secret se Evolution confirmar. Caso contrario, mantem null (bot-webhook passa sem validar).
+        if (!existingSecret) {
+          let setOk = false
+          for (const endpoint of [`${evoUrl}/webhook/set/${instanceName}`, `${evoUrl}/webhook/${instanceName}`]) {
+            try {
+              const r = await fetch(endpoint, { method: 'POST', headers: evoHeaders,
+                body: JSON.stringify({ webhook: { enabled: true, url: webhookUrl, byEvents: false, base64: false, events: ['MESSAGES_UPSERT', 'CONNECTION_UPDATE'] } }) })
+              if (r.ok) { setOk = true; break }
+            } catch { /* tenta proximo endpoint */ }
+          }
+          persistedSecret = setOk ? candidateSecret : null
+        }
         const connectRes = await fetch(`${evoUrl}/instance/connect/${instanceName}`, { headers: evoHeaders })
         if (connectRes.ok) { const cd = await connectRes.json(); qrcodeBase64 = cd.base64 ?? cd.qrcode?.base64 ?? null }
       }
-      await adminClient.from('whatsapp_instances').upsert({ organization_id: orgId, instance_name: instanceName, status: 'qrcode', last_qr_at: new Date().toISOString(), last_error: null, webhook_secret: secret }, { onConflict: 'organization_id' })
+
+      await adminClient.from('whatsapp_instances').upsert({ organization_id: orgId, instance_name: instanceName, status: 'qrcode', last_qr_at: new Date().toISOString(), last_error: null, webhook_secret: persistedSecret }, { onConflict: 'organization_id' })
       return jsonResponse({ status: 'qrcode', qrcode: qrcodeBase64, instance_name: instanceName })
     }
 
@@ -192,7 +206,29 @@ Deno.serve(async (req) => {
       if (!inst?.group_jid) return jsonResponse({ error: 'Grupo nao criado' }, 400)
       const res = await fetch(`${evoUrl}/group/findGroupInfos/${instanceName}?groupJid=${encodeURIComponent(inst.group_jid)}`, { headers: evoHeaders })
       if (!res.ok) return jsonResponse({ error: 'Falha ao buscar info' }, 502)
-      return jsonResponse({ ok: true, info: await res.json() })
+      const info = await res.json()
+      // Normaliza: extrai telefones dos participantes (digitos apenas). Lida com:
+      //   "5511...@s.whatsapp.net"   (formato padrao)
+      //   "5511...:1@s.whatsapp.net" (device suffix)
+      //   "12345@lid"                (LID format — sem digito de telefone, ignora)
+      //   estruturas aninhadas info.participants vs info.data.participants vs info.groupMetadata.participants
+      const rawParticipants: Array<{ id?: string; phoneNumber?: string; admin?: string | null }> =
+        info?.participants || info?.data?.participants || info?.groupMetadata?.participants || []
+      const memberPhones = rawParticipants
+        .map((p) => {
+          const raw = p?.phoneNumber || p?.id || ''
+          const beforeAt = raw.split('@')[0]
+          const beforeColon = beforeAt.split(':')[0]
+          const digits = beforeColon.replace(/\D/g, '')
+          return digits
+        })
+        .filter((s) => s.length >= 10)
+      // Normaliza meu proprio numero do profile pra comparar client-side se quiser
+      const myRaw = profile.phone || ''
+      const myDigits = myRaw.replace(/\D/g, '')
+      const myPhone = myDigits.startsWith('55') ? myDigits : (myDigits.length === 10 || myDigits.length === 11 ? '55' + myDigits : myDigits)
+      const iAmMember = memberPhones.includes(myPhone)
+      return jsonResponse({ ok: true, info, members: memberPhones, i_am_member: iAmMember, my_phone: myPhone })
     }
 
     if (action === 'remove_group_member') {

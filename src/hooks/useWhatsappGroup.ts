@@ -65,7 +65,7 @@ export function useWhatsappGroup() {
     }
   }
 
-  async function fetchMembersRaw(): Promise<{ ok: boolean; info?: any; error?: string }> {
+  async function fetchMembersRaw(): Promise<{ ok: boolean; info?: any; members?: string[]; iAmMember?: boolean; myPhone?: string; error?: string }> {
     const { data: sess } = await supabase.auth.getSession()
     const token = sess.session?.access_token
     if (!token) return { ok: false, error: 'Sessão expirou.' }
@@ -80,7 +80,7 @@ export function useWhatsappGroup() {
     })
     const json = await res.json().catch(() => ({}))
     if (!res.ok) return { ok: false, error: json.error || `HTTP ${res.status}` }
-    return { ok: true, info: json.info }
+    return { ok: true, info: json.info, members: json.members, iAmMember: json.i_am_member, myPhone: json.my_phone }
   }
 
   const createGroup = useCallback(() => invokeAction('create_alerts_group'), [])
