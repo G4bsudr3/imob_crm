@@ -14,6 +14,39 @@ const PAUSE_REASON_LABEL: Record<string, string> = {
   escalado_humano: 'lead pediu atendente humano',
 }
 
+type CompatProp = {
+  id: string; title: string; type: string
+  price: number|null; rent_price: number|null; bedrooms: number|null
+  location: string|null; neighborhood: string|null; city: string|null
+  score: number; scoreLabel: string; scoreColor: string
+}
+
+function scoreLeadPropMatch(
+  lead: { property_type: string|null; budget_max: number|null; bedrooms_needed: number|null; location_interest: string|null },
+  prop: { type: string|null; price: number|null; bedrooms: number|null; city: string|null; neighborhood: string|null }
+): { score: number; label: string; color: string } {
+  let score = 0
+  if (!lead.property_type || lead.property_type === prop.type) score += 25
+  const price = prop.price ?? 0
+  if (!lead.budget_max || price === 0) score += 30
+  else if (lead.budget_max >= price) score += 30
+  else if (lead.budget_max >= price * 0.85) score += 20
+  else if (lead.budget_max >= price * 0.70) score += 10
+  const propBeds = prop.bedrooms ?? 0
+  if (!lead.bedrooms_needed) score += 20
+  else if (propBeds >= lead.bedrooms_needed) score += 20
+  else if (propBeds === lead.bedrooms_needed - 1) score += 10
+  if (!lead.location_interest) score += 25
+  else {
+    const interest = lead.location_interest.toLowerCase()
+    if ((prop.city && interest.includes(prop.city.toLowerCase())) ||
+        (prop.neighborhood && interest.includes(prop.neighborhood.toLowerCase()))) score += 25
+  }
+  const label = score >= 85 ? 'Excelente' : score >= 70 ? 'Ótimo' : score >= 50 ? 'Bom' : score >= 30 ? 'Regular' : 'Baixo'
+  const color = score >= 70 ? 'text-success' : score >= 50 ? 'text-warning' : 'text-muted-foreground'
+  return { score, label, color }
+}
+
 type Props = {
   lead: Lead
   onClose: () => void
@@ -53,8 +86,9 @@ export function LeadDetail({ lead, onClose, onSaved }: Props) {
   })
   const [properties, setProperties] = useState<Array<{ id: string; title: string }>>([])
   const [savingDeal, setSavingDeal] = useState(false)
-  const [compatProps, setCompatProps] = useState<Array<{id:string;title:string;type:string;price:number|null;rent_price:number|null;bedrooms:number|null;location:string|null;neighborhood:string|null}> | null>(null)
+  const [compatProps, setCompatProps] = useState<CompatProp[]>([])
   const [loadingCompatProps, setLoadingCompatProps] = useState(false)
+  const [compatOpen, setCompatOpen] = useState(true)
 
   // Sincroniza com updates do lead via realtime (pai reabre/rehidrata via useLeads).
   // Sem isso, se `lead.bot_paused` muda fora do Detail (ex: bot pausou automaticamente ao agendar),
@@ -199,22 +233,32 @@ export function LeadDetail({ lead, onClose, onSaved }: Props) {
     onSaved()
   }
 
-  async function loadCompatibleProperties() {
-    if (loadingCompatProps) return
-    setLoadingCompatProps(true)
-    let q = supabase
-      .from('properties')
-      .select('id, title, type, price, rent_price, bedrooms, location, neighborhood')
-      .eq('organization_id', lead.organization_id!)
-      .eq('listing_status', 'available')
-      .limit(5)
-    if (lead.property_type) q = q.eq('type', lead.property_type)
-    if (lead.bedrooms_needed) q = q.gte('bedrooms', lead.bedrooms_needed)
-    if (lead.budget_max) q = q.lte('price', lead.budget_max * 1.15) // 15% buffer
-    const { data } = await q.order('featured', { ascending: false })
-    setCompatProps(data ?? [])
-    setLoadingCompatProps(false)
-  }
+  useEffect(() => {
+    if (!lead.organization_id) return
+    const orgId = lead.organization_id
+    const budget = form.budget_max ? parseFloat(form.budget_max) : null
+    const beds = form.bedrooms_needed ? parseInt(form.bedrooms_needed) : null
+    const timer = setTimeout(async () => {
+      setLoadingCompatProps(true)
+      const { data } = await supabase
+        .from('properties')
+        .select('id, title, type, price, rent_price, bedrooms, location, neighborhood, city')
+        .eq('organization_id', orgId)
+        .eq('listing_status', 'available')
+        .limit(50)
+      const scored = (data ?? []).map((p) => {
+        const { score, label, color } = scoreLeadPropMatch(
+          { property_type: form.property_type || null, budget_max: budget, bedrooms_needed: beds, location_interest: form.location_interest || null },
+          { type: p.type, price: p.price, bedrooms: p.bedrooms, city: (p as any).city, neighborhood: p.neighborhood }
+        )
+        return { ...p, score, scoreLabel: label, scoreColor: color } as CompatProp
+      }).sort((a, b) => b.score - a.score)
+      const above50 = scored.filter((p) => p.score >= 50)
+      setCompatProps(above50.length >= 3 ? above50.slice(0, 8) : scored.slice(0, 3))
+      setLoadingCompatProps(false)
+    }, 500)
+    return () => clearTimeout(timer)
+  }, [form.property_type, form.budget_max, form.bedrooms_needed, form.location_interest, lead.organization_id])
 
   const initials = (form.name || form.phone).slice(0, 2).toUpperCase()
   const hasMoreConv = convTotal === Infinity || (convTotal !== null && convTotal > conversations.length)
@@ -406,19 +450,22 @@ export function LeadDetail({ lead, onClose, onSaved }: Props) {
           <Card className="overflow-hidden">
             <button
               className="w-full flex items-center justify-between px-4 py-3 text-sm font-medium hover:bg-subtle/50 transition-colors"
-              onClick={() => { if (!compatProps) loadCompatibleProperties(); else setCompatProps(null) }}
+              onClick={() => setCompatOpen((v) => !v)}
             >
               <div className="flex items-center gap-2">
                 <Home size={14} className="text-muted-foreground" />
                 <span>Imóveis compatíveis</span>
-                {compatProps && <span className="text-xs text-muted-foreground font-normal">({compatProps.length} encontrado{compatProps.length !== 1 ? 's' : ''})</span>}
+                {loadingCompatProps && <span className="text-xs text-muted-foreground font-normal">Buscando…</span>}
+                {!loadingCompatProps && compatProps.length > 0 && (
+                  <span className="text-xs text-muted-foreground font-normal">({compatProps.length} encontrado{compatProps.length !== 1 ? 's' : ''})</span>
+                )}
               </div>
-              <ChevronUp size={14} className={cn('text-muted-foreground transition-transform', !compatProps && 'rotate-180')} />
+              <ChevronUp size={14} className={cn('text-muted-foreground transition-transform', !compatOpen && 'rotate-180')} />
             </button>
-            {compatProps !== null && (
+            {compatOpen && (
               <div className="border-t border-border">
                 {loadingCompatProps ? (
-                  <p className="px-4 py-3 text-xs text-muted-foreground">Buscando...</p>
+                  <p className="px-4 py-3 text-xs text-muted-foreground">Buscando…</p>
                 ) : compatProps.length === 0 ? (
                   <p className="px-4 py-3 text-xs text-muted-foreground">Nenhum imóvel disponível compatível com o perfil deste lead.</p>
                 ) : (
@@ -429,10 +476,11 @@ export function LeadDetail({ lead, onClose, onSaved }: Props) {
                           <p className="text-sm font-medium truncate">{p.title}</p>
                           <p className="text-xs text-muted-foreground truncate">{[p.location, p.neighborhood].filter(Boolean).join(' · ')}</p>
                         </div>
-                        <div className="shrink-0 text-right">
+                        <div className="shrink-0 text-right space-y-0.5">
                           {p.price ? <p className="text-xs font-medium">{formatCurrency(p.price)}</p> : null}
                           {p.rent_price ? <p className="text-xs text-muted-foreground">{formatCurrency(p.rent_price)}/mês</p> : null}
-                          {p.bedrooms ? <p className="text-[11px] text-muted-foreground">{p.bedrooms} quarto{p.bedrooms !== 1 ? 's' : ''}</p> : null}
+                          {p.bedrooms ? <p className="text-[11px] text-muted-foreground">{p.bedrooms} qto{p.bedrooms !== 1 ? 's' : ''}</p> : null}
+                          <p className={cn('text-[11px] font-semibold', p.scoreColor)}>{p.scoreLabel} · {p.score}%</p>
                         </div>
                       </div>
                     ))}

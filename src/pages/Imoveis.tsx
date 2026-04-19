@@ -207,6 +207,38 @@ function Section({ id, title, description, children }: { id?: string; title: str
   )
 }
 
+type CompatLead = {
+  id: string; name: string|null; phone: string; status: string
+  budget_max: number|null; bedrooms_needed: number|null; location_interest: string|null
+  score: number; scoreLabel: string; scoreColor: string
+}
+
+function scoreLeadPropMatch(
+  lead: { property_type: string|null; budget_max: number|null; bedrooms_needed: number|null; location_interest: string|null },
+  prop: { type: string|null; price: number|null; bedrooms: number|null; city: string|null; neighborhood: string|null }
+): { score: number; label: string; color: string } {
+  let score = 0
+  if (!lead.property_type || lead.property_type === prop.type) score += 25
+  const price = prop.price ?? 0
+  if (!lead.budget_max || price === 0) score += 30
+  else if (lead.budget_max >= price) score += 30
+  else if (lead.budget_max >= price * 0.85) score += 20
+  else if (lead.budget_max >= price * 0.70) score += 10
+  const propBeds = prop.bedrooms ?? 0
+  if (!lead.bedrooms_needed) score += 20
+  else if (propBeds >= lead.bedrooms_needed) score += 20
+  else if (propBeds === lead.bedrooms_needed - 1) score += 10
+  if (!lead.location_interest) score += 25
+  else {
+    const interest = lead.location_interest.toLowerCase()
+    if ((prop.city && interest.includes(prop.city.toLowerCase())) ||
+        (prop.neighborhood && interest.includes(prop.neighborhood.toLowerCase()))) score += 25
+  }
+  const label = score >= 85 ? 'Excelente' : score >= 70 ? 'Ótimo' : score >= 50 ? 'Bom' : score >= 30 ? 'Regular' : 'Baixo'
+  const color = score >= 70 ? 'text-success' : score >= 50 ? 'text-warning' : 'text-muted-foreground'
+  return { score, label, color }
+}
+
 const PROPERTY_FORM_SECTIONS: { id: string; label: string }[] = [
   { id: 'sec-basico', label: 'Básico' },
   { id: 'sec-valores', label: 'Valores' },
@@ -281,7 +313,7 @@ export function Imoveis() {
   const [uploadingPhotos, setUploadingPhotos] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
-  const [compatLeads, setCompatLeads] = useState<Array<{id:string;name:string|null;phone:string;status:string;budget_max:number|null;bedrooms_needed:number|null;location_interest:string|null}> | null>(null)
+  const [compatLeads, setCompatLeads] = useState<CompatLead[]>([])
   const [loadingCompatLeads, setLoadingCompatLeads] = useState(false)
 
   const isEditing = typeof mode === 'object'
@@ -441,36 +473,34 @@ export function Imoveis() {
     setPhotos((prev) => prev.map((p) => ({ ...p, is_cover: p.id === photoId })))
   }
 
-  async function loadCompatibleLeads() {
-    if (!orgId || loadingCompatLeads) return
-    setLoadingCompatLeads(true)
+  useEffect(() => {
+    if (!orgId || !isFormOpen) {
+      setCompatLeads([])
+      return
+    }
     const propertyPrice = parseFloat(form.price) || parseFloat(form.rent_price) || 0
     const propertyBedrooms = parseInt(form.bedrooms) || 0
-
-    let q = supabase
-      .from('leads')
-      .select('id, name, phone, status, budget_max, bedrooms_needed, location_interest, property_type')
-      .eq('organization_id', orgId)
-      .not('status', 'in', '("descartado","convertido")')
-      .limit(10)
-    if (form.type) q = q.or(`property_type.is.null,property_type.eq.${form.type}`)
-    const { data } = await q
-
-    // Filter in JS for budget + bedrooms (same logic as outbound-reengagement)
-    const matched = (data ?? []).filter((lead) => {
-      if (lead.budget_max != null && propertyPrice > 0 && lead.budget_max < propertyPrice * 0.85) return false
-      if (lead.bedrooms_needed != null && propertyBedrooms > 0 && propertyBedrooms < lead.bedrooms_needed) return false
-      if (lead.location_interest) {
-        const interest = lead.location_interest.toLowerCase()
-        const cityOk = form.city ? interest.includes(form.city.toLowerCase()) : false
-        const neighOk = form.neighborhood ? interest.includes(form.neighborhood.toLowerCase()) : false
-        if (!cityOk && !neighOk) return false
-      }
-      return true
-    })
-    setCompatLeads(matched)
-    setLoadingCompatLeads(false)
-  }
+    const timer = setTimeout(async () => {
+      setLoadingCompatLeads(true)
+      const { data } = await supabase
+        .from('leads')
+        .select('id, name, phone, status, budget_max, bedrooms_needed, location_interest, property_type')
+        .eq('organization_id', orgId)
+        .not('status', 'in', '("descartado","convertido")')
+        .limit(50)
+      const scored = (data ?? []).map((lead) => {
+        const { score, label, color } = scoreLeadPropMatch(
+          { property_type: lead.property_type, budget_max: lead.budget_max, bedrooms_needed: lead.bedrooms_needed, location_interest: lead.location_interest },
+          { type: form.type || null, price: propertyPrice || null, bedrooms: propertyBedrooms || null, city: form.city || null, neighborhood: form.neighborhood || null }
+        )
+        return { ...lead, score, scoreLabel: label, scoreColor: color } as CompatLead
+      }).sort((a, b) => b.score - a.score)
+      const above50 = scored.filter((l) => l.score >= 50)
+      setCompatLeads(above50.length >= 3 ? above50.slice(0, 8) : scored.slice(0, 3))
+      setLoadingCompatLeads(false)
+    }, 600)
+    return () => clearTimeout(timer)
+  }, [form.type, form.price, form.rent_price, form.bedrooms, form.neighborhood, form.city, orgId, isFormOpen])
 
   const rentsIncluded = form.listing_purpose === 'rent' || form.listing_purpose === 'both'
   const salesIncluded = form.listing_purpose === 'sale' || form.listing_purpose === 'both'
@@ -797,33 +827,32 @@ export function Imoveis() {
           {/* -------- 9. Leads compatíveis -------- */}
           <Section id="sec-compat" title="Leads compatíveis">
             <div id="sec-compat-inner">
-              <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-3">Leads compatíveis</p>
-              {!editingId ? (
-                <p className="text-xs text-muted-foreground">Salve o imóvel primeiro para ver leads compatíveis.</p>
+              <div className="flex items-center gap-2 mb-3">
+                <Users size={13} className="text-muted-foreground" />
+                <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Leads compatíveis</p>
+                {loadingCompatLeads && <span className="text-[11px] text-muted-foreground">Buscando…</span>}
+                {!loadingCompatLeads && compatLeads.length > 0 && (
+                  <span className="text-[11px] text-muted-foreground">{compatLeads.length} encontrado{compatLeads.length !== 1 ? 's' : ''}</span>
+                )}
+              </div>
+              {loadingCompatLeads ? (
+                <p className="text-xs text-muted-foreground">Buscando leads…</p>
+              ) : compatLeads.length === 0 ? (
+                <p className="text-xs text-muted-foreground">Nenhum lead ativo compatível com este imóvel.</p>
               ) : (
-                <>
-                  <Button variant="outline" size="sm" onClick={() => { if (compatLeads) setCompatLeads(null); else loadCompatibleLeads() }} loading={loadingCompatLeads} className="mb-3 w-full">
-                    <Users size={13} className="mr-1.5" />{compatLeads ? 'Ocultar' : 'Buscar leads compatíveis'}
-                  </Button>
-                  {compatLeads !== null && (
-                    compatLeads.length === 0 ? (
-                      <p className="text-xs text-muted-foreground">Nenhum lead ativo compatível com este imóvel.</p>
-                    ) : (
-                      <div className="space-y-2">
-                        {compatLeads.map((lead) => (
-                          <div key={lead.id} className="rounded-lg border border-border bg-card px-3 py-2">
-                            <div className="flex items-center justify-between gap-2">
-                              <p className="text-sm font-medium truncate">{lead.name ?? lead.phone}</p>
-                              <span className="text-[11px] text-muted-foreground shrink-0">{lead.status}</span>
-                            </div>
-                            <p className="text-xs text-muted-foreground">{lead.phone}</p>
-                            {lead.budget_max && <p className="text-[11px] text-muted-foreground">Orç. máx: R$ {lead.budget_max.toLocaleString('pt-BR')}</p>}
-                          </div>
-                        ))}
+                <div className="space-y-2">
+                  {compatLeads.map((lead) => (
+                    <div key={lead.id} className="rounded-lg border border-border bg-card px-3 py-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <p className="text-sm font-medium truncate">{lead.name ?? lead.phone}</p>
+                        <span className={cn('text-[11px] font-semibold shrink-0', lead.scoreColor)}>{lead.scoreLabel} · {lead.score}%</span>
                       </div>
-                    )
-                  )}
-                </>
+                      <p className="text-xs text-muted-foreground">{lead.phone}</p>
+                      {lead.budget_max ? <p className="text-[11px] text-muted-foreground">Orç. máx: {formatCurrency(lead.budget_max)}</p> : null}
+                      {lead.location_interest ? <p className="text-[11px] text-muted-foreground truncate">📍 {lead.location_interest}</p> : null}
+                    </div>
+                  ))}
+                </div>
               )}
             </div>
           </Section>
