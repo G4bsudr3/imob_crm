@@ -37,7 +37,6 @@ export function LeadCreateDialog({ onClose, onCreated }: Props) {
   })
   const [saving, setSaving] = useState(false)
   const [phoneExists, setPhoneExists] = useState<{ name: string | null } | null>(null)
-  const [checkingPhone, setCheckingPhone] = useState(false)
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -56,7 +55,6 @@ export function LeadCreateDialog({ onClose, onCreated }: Props) {
     const orgId = profile?.organization_id
     if (!orgId) return
 
-    setCheckingPhone(true)
     const timer = setTimeout(async () => {
       const { data } = await supabase
         .from('leads')
@@ -64,7 +62,6 @@ export function LeadCreateDialog({ onClose, onCreated }: Props) {
         .eq('organization_id', orgId)
         .eq('phone', digits.trim())
         .maybeSingle()
-      setCheckingPhone(false)
       if (data) {
         setPhoneExists({ name: (data as { name: string | null }).name })
       } else {
@@ -72,10 +69,7 @@ export function LeadCreateDialog({ onClose, onCreated }: Props) {
       }
     }, 400)
 
-    return () => {
-      clearTimeout(timer)
-      setCheckingPhone(false)
-    }
+    return () => clearTimeout(timer)
   }, [form.phone, profile?.organization_id])
 
   async function handleSave() {
