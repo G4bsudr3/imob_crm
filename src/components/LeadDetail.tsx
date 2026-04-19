@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react'
-import { X, Save, MessageSquare, User, Calendar, Phone, Bot, BotOff, MapPin } from 'lucide-react'
+import { X, Save, MessageSquare, User, Calendar, Phone, Bot, BotOff, MapPin, Trophy, Send, ChevronUp } from 'lucide-react'
 import { supabase } from '../lib/supabase'
 import type { Lead, Conversation } from '../types/database'
-import { formatDate, formatTime, cn, STATUS_APPT_LABELS, STATUS_APPT_VARIANTS } from '../lib/utils'
+import { formatDate, formatTime, cn, STATUS_APPT_LABELS, STATUS_APPT_VARIANTS, formatCurrency } from '../lib/utils'
 import { Button } from './ui/Button'
 import { Field, Input, Textarea } from './ui/Input'
 import { Badge } from './ui/Badge'
@@ -34,12 +34,26 @@ export function LeadDetail({ lead, onClose, onSaved }: Props) {
   })
   const [conversations, setConversations] = useState<Conversation[]>([])
   const [loadingConv, setLoadingConv] = useState(true)
+  const [convOffset, setConvOffset] = useState(0)
+  const [convTotal, setConvTotal] = useState<number | null>(null)
+  const [loadingMoreConv, setLoadingMoreConv] = useState(false)
   const [leadAppointments, setLeadAppointments] = useState<Array<{ id: string; scheduled_at: string; status: string; notes: string | null; properties: { title: string; location: string } | null }>>([])
   const [loadingAppts, setLoadingAppts] = useState(true)
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
   const [botPaused, setBotPaused] = useState(lead.bot_paused ?? false)
   const [togglingBot, setTogglingBot] = useState(false)
+  const [manualMsg, setManualMsg] = useState('')
+  const [sendingMsg, setSendingMsg] = useState(false)
+  const [dealForm, setDealForm] = useState({
+    deal_type: lead.deal_type ?? '',
+    deal_value: lead.deal_value?.toString() ?? '',
+    deal_closed_at: lead.deal_closed_at ?? new Date().toISOString().slice(0, 10),
+    deal_property_id: lead.deal_property_id ?? '',
+  })
+  const [properties, setProperties] = useState<Array<{ id: string; title: string }>>([])
+  const [savingDeal, setSavingDeal] = useState(false)
+
   // Sincroniza com updates do lead via realtime (pai reabre/rehidrata via useLeads).
   // Sem isso, se `lead.bot_paused` muda fora do Detail (ex: bot pausou automaticamente ao agendar),
   // o card ficaria com valor antigo.
@@ -53,12 +67,36 @@ export function LeadDetail({ lead, onClose, onSaved }: Props) {
       .from('conversations')
       .select('*')
       .eq('lead_id', lead.id)
-      .order('sent_at', { ascending: true })
+      .order('sent_at', { ascending: false })
+      .range(0, 29)
       .then(({ data }) => {
-        setConversations(data ?? [])
+        const batch = data ?? []
+        setConversations([...batch].reverse())
+        // If we got a full batch there may be more; flag with a sentinel so the
+        // "load more" button appears without a separate count query on open.
+        setConvTotal(batch.length === 30 ? Infinity : batch.length)
+        setConvOffset(30)
         setLoadingConv(false)
       })
   }, [lead.id])
+
+  async function handleLoadMoreConv() {
+    setLoadingMoreConv(true)
+    const { data } = await supabase
+      .from('conversations')
+      .select('*')
+      .eq('lead_id', lead.id)
+      .order('sent_at', { ascending: false })
+      .range(convOffset, convOffset + 29)
+    const batch = data ?? []
+    setConversations((prev) => [...[...batch].reverse(), ...prev])
+    setConvOffset((o) => o + 30)
+    if (batch.length < 30) {
+      // We've now loaded everything; total is exactly what we have.
+      setConvTotal(convOffset + batch.length)
+    }
+    setLoadingMoreConv(false)
+  }
 
   useEffect(() => {
     supabase
@@ -71,6 +109,16 @@ export function LeadDetail({ lead, onClose, onSaved }: Props) {
         setLoadingAppts(false)
       })
   }, [lead.id])
+
+  useEffect(() => {
+    if (lead.status !== 'convertido') return
+    supabase
+      .from('properties')
+      .select('id, title')
+      .eq('organization_id', lead.organization_id!)
+      .order('title')
+      .then(({ data }) => setProperties(data ?? []))
+  }, [lead.status])
 
   async function handleToggleBot() {
     const next = !botPaused
@@ -112,7 +160,45 @@ export function LeadDetail({ lead, onClose, onSaved }: Props) {
     onSaved()
   }
 
+  async function handleSendManual() {
+    const text = manualMsg.trim()
+    if (!text) return
+    setSendingMsg(true)
+    const { error } = await supabase.functions.invoke('evolution-proxy', {
+      body: { action: 'sendText', phone: lead.phone, message: text },
+    })
+    setSendingMsg(false)
+    if (error) {
+      toast.error('Erro ao enviar', (error as Error).message)
+      return
+    }
+    setConversations((prev) => [
+      ...prev,
+      { id: crypto.randomUUID(), direction: 'out', message: text, sent_at: new Date().toISOString(), lead_id: lead.id } as Conversation,
+    ])
+    setManualMsg('')
+    toast.success('Mensagem enviada')
+  }
+
+  async function handleSaveDeal() {
+    setSavingDeal(true)
+    const { error } = await supabase.from('leads').update({
+      deal_type: dealForm.deal_type || null,
+      deal_value: dealForm.deal_value ? parseFloat(dealForm.deal_value) : null,
+      deal_closed_at: dealForm.deal_closed_at || null,
+      deal_property_id: dealForm.deal_property_id || null,
+    }).eq('id', lead.id)
+    setSavingDeal(false)
+    if (error) {
+      toast.error('Erro ao salvar negócio', error.message)
+      return
+    }
+    toast.success('Negócio salvo')
+    onSaved()
+  }
+
   const initials = (form.name || form.phone).slice(0, 2).toUpperCase()
+  const hasMoreConv = convTotal === Infinity || (convTotal !== null && convTotal > conversations.length)
 
   return (
     <div className="fixed inset-0 z-50 flex animate-fade-in">
@@ -176,6 +262,86 @@ export function LeadDetail({ lead, onClose, onSaved }: Props) {
               </Button>
             </div>
           </Card>
+
+          {/* negócio fechado — só aparece quando convertido */}
+          {lead.status === 'convertido' && (
+            <Card className="overflow-hidden">
+              <div className="px-5 pt-5 pb-3 border-b border-border flex items-center gap-2">
+                <Trophy size={13} className="text-muted-foreground" />
+                <p className="text-sm font-semibold tracking-tight">Negócio fechado</p>
+              </div>
+              <div className="p-5">
+                {lead.deal_type ? (
+                  <div className="space-y-1 text-sm">
+                    <p><span className="text-muted-foreground">Tipo:</span> {lead.deal_type === 'venda' ? 'Venda' : 'Aluguel'}</p>
+                    {lead.deal_value != null && (
+                      <p><span className="text-muted-foreground">Valor:</span> {formatCurrency(lead.deal_value)}</p>
+                    )}
+                    {lead.deal_closed_at && (
+                      <p><span className="text-muted-foreground">Fechado em:</span> {formatDate(lead.deal_closed_at)}</p>
+                    )}
+                    {lead.deal_property_id && (
+                      <p><span className="text-muted-foreground">Imóvel:</span> {properties.find((p) => p.id === lead.deal_property_id)?.title ?? lead.deal_property_id}</p>
+                    )}
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    <div className="grid grid-cols-2 gap-3">
+                      <Field label="Tipo de negócio">
+                        <select
+                          className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
+                          value={dealForm.deal_type}
+                          onChange={(e) => setDealForm((f) => ({ ...f, deal_type: e.target.value }))}
+                        >
+                          <option value="">Tipo de negócio</option>
+                          <option value="venda">Venda</option>
+                          <option value="aluguel">Aluguel</option>
+                        </select>
+                      </Field>
+                      <Field label="Valor (R$)">
+                        <Input
+                          type="number"
+                          placeholder="Valor (R$)"
+                          value={dealForm.deal_value}
+                          onChange={(e) => setDealForm((f) => ({ ...f, deal_value: e.target.value }))}
+                        />
+                      </Field>
+                      <Field label="Data de fechamento">
+                        <Input
+                          type="date"
+                          value={dealForm.deal_closed_at}
+                          onChange={(e) => setDealForm((f) => ({ ...f, deal_closed_at: e.target.value }))}
+                        />
+                      </Field>
+                      <Field label="Imóvel (opcional)">
+                        <select
+                          className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
+                          value={dealForm.deal_property_id}
+                          onChange={(e) => setDealForm((f) => ({ ...f, deal_property_id: e.target.value }))}
+                        >
+                          <option value="">Imóvel (opcional)</option>
+                          {properties.map((p) => (
+                            <option key={p.id} value={p.id}>{p.title}</option>
+                          ))}
+                        </select>
+                      </Field>
+                    </div>
+                    <div className="flex justify-end">
+                      <Button
+                        size="sm"
+                        onClick={handleSaveDeal}
+                        loading={savingDeal}
+                        disabled={!dealForm.deal_type}
+                        leftIcon={<Save size={12} />}
+                      >
+                        Salvar negócio
+                      </Button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </Card>
+          )}
 
           {/* agendamentos do lead */}
           {(loadingAppts || leadAppointments.length > 0) && (
@@ -281,6 +447,19 @@ export function LeadDetail({ lead, onClose, onSaved }: Props) {
                 <p className="text-sm text-muted-foreground text-center py-6">Nenhuma mensagem registrada ainda.</p>
               ) : (
                 <div className="space-y-2 max-h-[420px] overflow-y-auto pr-1">
+                  {hasMoreConv && (
+                    <div className="flex justify-center pb-2">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        loading={loadingMoreConv}
+                        onClick={handleLoadMoreConv}
+                        leftIcon={<ChevronUp size={12} />}
+                      >
+                        Carregar mensagens anteriores
+                      </Button>
+                    </div>
+                  )}
                   {conversations.map((c) => (
                     <div
                       key={c.id}
@@ -303,6 +482,39 @@ export function LeadDetail({ lead, onClose, onSaved }: Props) {
                 </div>
               )}
             </div>
+            {botPaused && (
+              <div className="px-5 pb-5">
+                <div className="flex items-center gap-2 my-3">
+                  <div className="flex-1 h-px bg-border" />
+                  <span className="text-[11px] text-muted-foreground shrink-0">Responder como humano</span>
+                  <div className="flex-1 h-px bg-border" />
+                </div>
+                <div className="flex gap-2 items-end">
+                  <Textarea
+                    rows={2}
+                    className="flex-1 resize-none"
+                    placeholder="Digite uma mensagem..."
+                    value={manualMsg}
+                    onChange={(e) => setManualMsg(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault()
+                        handleSendManual()
+                      }
+                    }}
+                  />
+                  <Button
+                    size="sm"
+                    onClick={handleSendManual}
+                    loading={sendingMsg}
+                    disabled={!manualMsg.trim()}
+                    leftIcon={<Send size={12} />}
+                  >
+                    Enviar
+                  </Button>
+                </div>
+              </div>
+            )}
           </Card>
         </div>
       </aside>

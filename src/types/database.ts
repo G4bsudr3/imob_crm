@@ -25,6 +25,7 @@ export type Database = {
           organization_id: string | null
           google_event_id: string | null
           google_calendar_user_id: string | null
+          reminder_24h_sent_at: string | null
         }
         Insert: {
           created_at?: string
@@ -38,6 +39,7 @@ export type Database = {
           organization_id?: string | null
           google_event_id?: string | null
           google_calendar_user_id?: string | null
+          reminder_24h_sent_at?: string | null
         }
         Update: {
           created_at?: string
@@ -51,6 +53,7 @@ export type Database = {
           organization_id?: string | null
           google_event_id?: string | null
           google_calendar_user_id?: string | null
+          reminder_24h_sent_at?: string | null
         }
         Relationships: [
           {
@@ -97,6 +100,7 @@ export type Database = {
           communication_style: string
           company_differentials: string | null
           service_areas: string | null
+          auto_assign: boolean
         }
         Insert: {
           created_at?: string
@@ -125,6 +129,7 @@ export type Database = {
           communication_style?: string
           company_differentials?: string | null
           service_areas?: string | null
+          auto_assign?: boolean
         }
         Update: {
           created_at?: string
@@ -153,6 +158,7 @@ export type Database = {
           communication_style?: string
           company_differentials?: string | null
           service_areas?: string | null
+          auto_assign?: boolean
         }
         Relationships: []
       }
@@ -313,6 +319,39 @@ export type Database = {
           }
         ]
       }
+      property_photos: {
+        Row: {
+          id: string
+          property_id: string
+          organization_id: string
+          storage_path: string
+          url: string
+          display_order: number
+          is_cover: boolean
+          created_at: string
+        }
+        Insert: {
+          id?: string
+          property_id: string
+          organization_id: string
+          storage_path: string
+          url: string
+          display_order?: number
+          is_cover?: boolean
+          created_at?: string
+        }
+        Update: {
+          id?: string
+          property_id?: string
+          organization_id?: string
+          storage_path?: string
+          url?: string
+          display_order?: number
+          is_cover?: boolean
+          created_at?: string
+        }
+        Relationships: []
+      }
       conversations: {
         Row: {
           direction: string
@@ -379,11 +418,16 @@ export type Database = {
           organization_id: string | null
           last_message_at: string | null
           source: string | null
+          source_detail: string | null
           email: string | null
           name_confirmed: boolean
           bot_paused: boolean
           bot_paused_at: string | null
           bot_paused_reason: string | null
+          deal_type: string | null
+          deal_value: number | null
+          deal_closed_at: string | null
+          deal_property_id: string | null
         }
         Insert: {
           assigned_to?: string | null
@@ -403,11 +447,16 @@ export type Database = {
           organization_id?: string | null
           last_message_at?: string | null
           source?: string | null
+          source_detail?: string | null
           email?: string | null
           name_confirmed?: boolean
           bot_paused?: boolean
           bot_paused_at?: string | null
           bot_paused_reason?: string | null
+          deal_type?: string | null
+          deal_value?: number | null
+          deal_closed_at?: string | null
+          deal_property_id?: string | null
         }
         Update: {
           assigned_to?: string | null
@@ -427,11 +476,16 @@ export type Database = {
           organization_id?: string | null
           last_message_at?: string | null
           source?: string | null
+          source_detail?: string | null
           email?: string | null
           name_confirmed?: boolean
           bot_paused?: boolean
           bot_paused_at?: string | null
           bot_paused_reason?: string | null
+          deal_type?: string | null
+          deal_value?: number | null
+          deal_closed_at?: string | null
+          deal_property_id?: string | null
         }
         Relationships: [
           {
@@ -745,3 +799,4 @@ export type Organization = Tables<'organizations'>
 export type OrganizationInvitation = Tables<'organization_invitations'>
 export type WhatsappInstance = Tables<'whatsapp_instances'>
 export type CalendarIntegrationRow = Tables<'calendar_integrations'>
+export type PropertyPhoto = Tables<'property_photos'>

@@ -9,7 +9,7 @@ function unaccent(s: string): string { return s.normalize('NFD').replace(/[\u030
 type EvolutionMessage = { event: string; instance?: string; data?: { key?: { remoteJid?: string; fromMe?: boolean; id?: string }; pushName?: string; message?: { conversation?: string; extendedTextMessage?: { text?: string }; audioMessage?: any; imageMessage?: { url?: string; mimetype?: string; caption?: string }; videoMessage?: { caption?: string } }; messageType?: string } }
 type Lead = { id: string; organization_id: string; name: string | null; phone: string; email: string | null; name_confirmed: boolean; bot_paused: boolean; bot_paused_reason: string | null; status: string; property_type: string | null; location_interest: string | null; budget_min: number | null; budget_max: number | null; bedrooms_needed: number | null; profile_notes: string | null }
 type Organization = { legal_name: string | null; trade_name: string | null; website: string | null; email: string | null; phone: string | null; address_city: string | null; address_state: string | null }
-type BotConfig = { is_active: boolean; persona: string | null; welcome_message: string; triagem_localizacao: string; triagem_tipo: string; triagem_orcamento: string; triagem_quartos: string; mensagem_agendamento: string; farewell_message: string; no_properties_message: string; business_hours_enabled: boolean; business_hours_start: string; business_hours_end: string; outside_hours_message: string; max_properties_shown: number; can_schedule: boolean; can_escalate: boolean; can_negotiate_price: boolean; show_listing_links: boolean; communication_style: 'casual' | 'balanced' | 'formal'; company_differentials: string | null; service_areas: string | null }
+type BotConfig = { is_active: boolean; persona: string | null; welcome_message: string; triagem_localizacao: string; triagem_tipo: string; triagem_orcamento: string; triagem_quartos: string; mensagem_agendamento: string; farewell_message: string; no_properties_message: string; business_hours_enabled: boolean; business_hours_start: string; business_hours_end: string; outside_hours_message: string; max_properties_shown: number; can_schedule: boolean; can_escalate: boolean; can_negotiate_price: boolean; show_listing_links: boolean; communication_style: 'casual' | 'balanced' | 'formal'; company_differentials: string | null; service_areas: string | null; auto_assign?: boolean }
 
 function parseBrtDate(input: string): Date | null {
   const s = input.trim()
@@ -253,6 +253,22 @@ Deno.serve(async (req) => {
   if (isNewLead) upsertPayload.name = pushName
   const { data: lead, error: leadErr } = await admin.from('leads').upsert(upsertPayload as any, { onConflict: 'organization_id,phone' }).select().single()
   if (leadErr || !lead) return ok()
+
+  // Round-robin assignment: pick the agent with the oldest last_assigned_at
+  if (isNewLead && config.auto_assign) {
+    const { data: agent } = await admin
+      .from('profiles')
+      .select('id')
+      .eq('organization_id', orgId)
+      .in('role', ['admin', 'manager', 'user'])
+      .order('last_assigned_at', { ascending: true, nullsFirst: true })
+      .limit(1)
+      .maybeSingle()
+    if (agent) {
+      await admin.from('leads').update({ assigned_to: agent.id }).eq('id', lead.id)
+      await admin.from('profiles').update({ last_assigned_at: new Date().toISOString() }).eq('id', agent.id)
+    }
+  }
 
   const storedText = isImage ? `📷 ${text}` : isAudio ? `🎙️ ${text}` : text
   await admin.from('conversations').insert({ lead_id: lead.id, organization_id: orgId, message: storedText, direction: 'in', whatsapp_message_id: wamId })

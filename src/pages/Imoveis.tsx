@@ -1,9 +1,11 @@
-import { useState } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import {
   Plus, Trash2, Home, MapPin, BedDouble, Bath, Ruler, Pencil, X, Car, Layers,
-  Calendar as CalendarIcon, Sparkles, Search, ExternalLink,
+  Calendar as CalendarIcon, Sparkles, Search, ExternalLink, ImagePlus, Star,
 } from 'lucide-react'
 import { useProperties, type PropertyInput } from '../hooks/useProperties'
+import { useProfile } from '../hooks/useProfile'
+import { supabase } from '../lib/supabase'
 import {
   formatCurrency,
   PROPERTY_TYPES,
@@ -68,6 +70,14 @@ type FormState = {
   listing_url: string
 
   internal_notes: string
+}
+
+type PhotoRow = {
+  id: string
+  url: string
+  storage_path: string
+  is_cover: boolean
+  display_order: number
 }
 
 const emptyForm: FormState = {
@@ -204,6 +214,7 @@ const PROPERTY_FORM_SECTIONS: { id: string; label: string }[] = [
   { id: 'sec-specs', label: 'Specs' },
   { id: 'sec-amenidades', label: 'Amenidades' },
   { id: 'sec-midia', label: 'Mídia' },
+  { id: 'sec-fotos', label: 'Fotos' },
   { id: 'sec-notas', label: 'Notas' },
 ]
 
@@ -254,6 +265,7 @@ function Checkbox({ checked, onChange, label }: { checked: boolean; onChange: (v
 
 export function Imoveis() {
   const { properties, loading, createProperty, updateProperty, updateStatus, deleteProperty } = useProperties()
+  const { profile } = useProfile()
   const confirm = useConfirm()
   const toast = useToast()
   const [mode, setMode] = useState<'idle' | 'create' | { edit: string }>('idle')
@@ -264,24 +276,45 @@ export function Imoveis() {
   const [search, setSearch] = useState('')
   const [filterStatus, setFilterStatus] = useState('')
 
+  const [photos, setPhotos] = useState<PhotoRow[]>([])
+  const [uploadingPhotos, setUploadingPhotos] = useState(false)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+
   const isEditing = typeof mode === 'object'
   const editingId = isEditing ? mode.edit : null
   const isFormOpen = mode !== 'idle'
+  const orgId = profile?.organization_id
+
+  useEffect(() => {
+    if (!editingId) {
+      setPhotos([])
+      return
+    }
+    supabase
+      .from('property_photos')
+      .select('*')
+      .eq('property_id', editingId)
+      .order('display_order')
+      .then(({ data }) => setPhotos((data as PhotoRow[]) ?? []))
+  }, [editingId])
 
   function startCreate() {
     setForm(emptyForm)
+    setPhotos([])
     setError(null)
     setMode('create')
   }
 
   function startEdit(p: Property) {
     setForm(propertyToForm(p))
+    setPhotos([])
     setError(null)
     setMode({ edit: p.id })
   }
 
   function cancel() {
     setForm(emptyForm)
+    setPhotos([])
     setError(null)
     setMode('idle')
   }
@@ -315,14 +348,25 @@ export function Imoveis() {
     setSaving(true)
     setError(null)
     const input = formToInput(form)
-    const err = editingId
-      ? await updateProperty(editingId, input)
-      : await createProperty(input)
+    let err: any
+    let newPropertyId: string | undefined
+    if (editingId) {
+      err = await updateProperty(editingId, input)
+    } else {
+      const result = await createProperty(input)
+      err = result.error
+      newPropertyId = result.id
+    }
     setSaving(false)
     if (err) {
       setError(err.message ?? 'Erro ao salvar')
       toast.error('Erro ao salvar imóvel', err.message)
       return
+    }
+    if (newPropertyId && orgId) {
+      supabase.functions.invoke('outbound-reengagement', {
+        body: { property_id: newPropertyId, organization_id: orgId },
+      }).catch(() => {})
     }
     toast.success(editingId ? 'Imóvel atualizado' : 'Imóvel cadastrado', form.title)
     cancel()
@@ -339,6 +383,58 @@ export function Imoveis() {
     const err = await deleteProperty(p.id)
     if (err) toast.error('Erro ao remover', err.message)
     else toast.success('Imóvel removido')
+  }
+
+  async function handlePhotoUpload(files: FileList) {
+    if (!editingId || !orgId) return
+    setUploadingPhotos(true)
+    const existingCount = photos.length
+    const newPhotos: PhotoRow[] = []
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i]
+      const path = `${orgId}/${editingId}/${Date.now()}_${file.name}`
+      const { error: uploadError } = await supabase.storage
+        .from('property-photos')
+        .upload(path, file)
+      if (uploadError) {
+        toast.error('Erro ao enviar foto', uploadError.message)
+        continue
+      }
+      const publicUrl = supabase.storage.from('property-photos').getPublicUrl(path).data.publicUrl
+      const { data: inserted, error: insertError } = await supabase
+        .from('property_photos')
+        .insert({
+          property_id: editingId,
+          organization_id: orgId,
+          storage_path: path,
+          url: publicUrl,
+          display_order: existingCount + i,
+          is_cover: existingCount === 0 && i === 0,
+        })
+        .select()
+        .single()
+      if (insertError) {
+        toast.error('Erro ao salvar foto', insertError.message)
+        continue
+      }
+      newPhotos.push(inserted as PhotoRow)
+    }
+    setPhotos((prev) => [...prev, ...newPhotos])
+    setUploadingPhotos(false)
+    if (fileInputRef.current) fileInputRef.current.value = ''
+  }
+
+  async function handleDeletePhoto(photo: PhotoRow) {
+    await supabase.from('property_photos').delete().eq('id', photo.id)
+    await supabase.storage.from('property-photos').remove([photo.storage_path])
+    setPhotos((prev) => prev.filter((p) => p.id !== photo.id))
+  }
+
+  async function handleSetCover(photoId: string) {
+    if (!editingId) return
+    await supabase.from('property_photos').update({ is_cover: false }).eq('property_id', editingId)
+    await supabase.from('property_photos').update({ is_cover: true }).eq('id', photoId)
+    setPhotos((prev) => prev.map((p) => ({ ...p, is_cover: p.id === photoId })))
   }
 
   const rentsIncluded = form.listing_purpose === 'rent' || form.listing_purpose === 'both'
@@ -579,7 +675,82 @@ export function Imoveis() {
             </div>
           </Section>
 
-          {/* -------- 7. Interno -------- */}
+          {/* -------- 7. Fotos -------- */}
+          <Section id="sec-fotos" title="Fotos" description="Galeria de imagens do imóvel">
+            {!editingId ? (
+              <p className="text-sm text-muted-foreground">Salve o imóvel primeiro para adicionar fotos</p>
+            ) : (
+              <div className="space-y-4">
+                {photos.length > 0 && (
+                  <div className="flex flex-wrap gap-3">
+                    {photos.map((photo) => (
+                      <div key={photo.id} className="relative group w-20 h-20 rounded-lg overflow-hidden border border-border shrink-0">
+                        <img
+                          src={photo.url}
+                          alt=""
+                          className="w-full h-full object-cover"
+                        />
+                        <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => handleSetCover(photo.id)}
+                            title="Definir como capa"
+                            className={cn(
+                              'p-1 rounded transition-colors',
+                              photo.is_cover
+                                ? 'text-yellow-400'
+                                : 'text-white hover:text-yellow-400',
+                            )}
+                          >
+                            <Star size={14} fill={photo.is_cover ? 'currentColor' : 'none'} />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleDeletePhoto(photo)}
+                            title="Remover foto"
+                            className="p-1 rounded text-white hover:text-red-400 transition-colors"
+                          >
+                            <Trash2 size={14} />
+                          </button>
+                        </div>
+                        {photo.is_cover && (
+                          <span className="absolute bottom-0 left-0 right-0 text-[9px] text-center bg-yellow-400/90 text-black font-medium py-0.5">
+                            Capa
+                          </span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <label className={cn(
+                  'flex flex-col items-center justify-center gap-2 w-full rounded-lg border-2 border-dashed border-border px-4 py-6 cursor-pointer transition-colors',
+                  uploadingPhotos
+                    ? 'opacity-50 pointer-events-none'
+                    : 'hover:border-muted-foreground hover:bg-subtle/40',
+                )}>
+                  <ImagePlus size={22} className="text-muted-foreground" />
+                  <span className="text-sm text-muted-foreground">
+                    {uploadingPhotos ? 'Enviando...' : 'Clique para adicionar fotos'}
+                  </span>
+                  <span className="text-xs text-muted-foreground">JPEG, PNG ou WebP</span>
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    multiple
+                    accept="image/jpeg,image/png,image/webp"
+                    className="sr-only"
+                    onChange={(e) => {
+                      if (e.target.files && e.target.files.length > 0) {
+                        handlePhotoUpload(e.target.files)
+                      }
+                    }}
+                  />
+                </label>
+              </div>
+            )}
+          </Section>
+
+          {/* -------- 8. Interno -------- */}
           <Section id="sec-notas" title="Anotações internas" description="Visíveis apenas para a equipe — nunca exibidas ao cliente">
             <Field label="Notas privadas">
               <Textarea rows={3} value={form.internal_notes}

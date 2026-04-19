@@ -63,14 +63,14 @@ export function useProperties() {
     setLoading(false)
   }
 
-  async function createProperty(input: PropertyInput) {
-    if (!profile?.organization_id) return { message: 'Usuário sem organização' } as { message: string }
-    const { error } = await supabase.from('properties').insert({
+  async function createProperty(input: PropertyInput): Promise<{ error: any; id?: string }> {
+    if (!profile?.organization_id) return { error: { message: 'Usuário sem organização' } }
+    const { data, error } = await supabase.from('properties').insert({
       ...input,
       organization_id: profile.organization_id,
-    })
+    }).select('id').single()
     if (!error) fetchProperties()
-    return error
+    return { error, id: data?.id }
   }
 
   async function updateProperty(id: string, patch: Partial<PropertyInput>) {

@@ -128,6 +128,7 @@ const DEFAULT_CONFIG: Partial<BotConfig> = {
   communication_style: 'balanced',
   company_differentials: '',
   service_areas: '',
+  auto_assign: false,
 }
 
 export function BotConfig() {
@@ -188,6 +189,7 @@ export function BotConfig() {
       communication_style: c.communication_style ?? 'balanced',
       company_differentials: c.company_differentials ?? '',
       service_areas: c.service_areas ?? '',
+      auto_assign: c.auto_assign ?? false,
     }
     const { data, error } = await supabase
       .from('bot_config')
@@ -319,6 +321,14 @@ export function BotConfig() {
                   : 'O bot só descreve o imóvel em texto, sem URLs.'}
                 checked={config.show_listing_links}
                 onChange={(v) => update({ show_listing_links: v })}
+              />
+              <ToggleRow
+                label="Distribuição automática de leads (round-robin)"
+                description={config.auto_assign
+                  ? 'Cada lead novo que entrar via WhatsApp será atribuído automaticamente ao próximo corretor da fila (rodízio).'
+                  : 'Leads entram sem corretor atribuído. Distribua manualmente pela view de leads.'}
+                checked={config.auto_assign ?? false}
+                onChange={(v) => update({ auto_assign: v })}
               />
             </SubSection>
 

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { X, UserPlus } from 'lucide-react'
+import { X, UserPlus, AlertTriangle } from 'lucide-react'
 import { supabase } from '../lib/supabase'
 import { useProfile } from '../hooks/useProfile'
 import { Button } from './ui/Button'
@@ -36,6 +36,8 @@ export function LeadCreateDialog({ onClose, onCreated }: Props) {
     profile_notes: '',
   })
   const [saving, setSaving] = useState(false)
+  const [phoneExists, setPhoneExists] = useState<{ name: string | null } | null>(null)
+  const [checkingPhone, setCheckingPhone] = useState(false)
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -44,6 +46,37 @@ export function LeadCreateDialog({ onClose, onCreated }: Props) {
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [onClose])
+
+  useEffect(() => {
+    const digits = form.phone.replace(/\D/g, '')
+    if (digits.length < 8) {
+      setPhoneExists(null)
+      return
+    }
+    const orgId = profile?.organization_id
+    if (!orgId) return
+
+    setCheckingPhone(true)
+    const timer = setTimeout(async () => {
+      const { data } = await supabase
+        .from('leads')
+        .select('name')
+        .eq('organization_id', orgId)
+        .eq('phone', digits.trim())
+        .maybeSingle()
+      setCheckingPhone(false)
+      if (data) {
+        setPhoneExists({ name: (data as { name: string | null }).name })
+      } else {
+        setPhoneExists(null)
+      }
+    }, 400)
+
+    return () => {
+      clearTimeout(timer)
+      setCheckingPhone(false)
+    }
+  }, [form.phone, profile?.organization_id])
 
   async function handleSave() {
     const phoneDigits = form.phone.replace(/\D/g, '')
@@ -124,6 +157,12 @@ export function LeadCreateDialog({ onClose, onCreated }: Props) {
                 placeholder="(11) 91234-5678"
                 inputMode="numeric"
               />
+              {phoneExists !== null && (
+                <p className="text-[11px] text-warning flex items-center gap-1 mt-1">
+                  <AlertTriangle size={10} />
+                  Já existe um lead com esse telefone{phoneExists.name ? ': ' + phoneExists.name : ''}
+                </p>
+              )}
             </Field>
           </div>
 

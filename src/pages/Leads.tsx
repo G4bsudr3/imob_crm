@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { Search, Trash2, Eye, Users, LayoutGrid, Rows3, Radio, Plus, Download } from 'lucide-react'
+import { Search, Trash2, Eye, Users, LayoutGrid, Rows3, Radio, Plus, Download, Upload } from 'lucide-react'
 import { useLeads } from '../hooks/useLeads'
 import { useProfile } from '../hooks/useProfile'
 import { supabase } from '../lib/supabase'
@@ -23,6 +23,293 @@ const STATUS_OPTIONS = ['novo', 'em_contato', 'agendado', 'descartado', 'convert
 
 type View = 'table' | 'kanban'
 
+type ParsedRow = {
+  name: string
+  phone: string
+  property_type: string
+  location_interest: string
+  bedrooms_needed: string
+  budget_max: string
+  source_detail: string
+  duplicate: boolean
+}
+
+function LeadImportDialog({ onClose, onImported, orgId }: { onClose: () => void; onImported: () => void; orgId: string }) {
+  const toast = useToast()
+  const [file, setFile] = useState<File | null>(null)
+  const [rows, setRows] = useState<ParsedRow[]>([])
+  const [ignoreDuplicates, setIgnoreDuplicates] = useState(true)
+  const [importing, setImporting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  async function handleFile(f: File) {
+    setFile(f)
+    setError(null)
+    try {
+      const text = await f.text()
+      const cleaned = text.replace(/^\uFEFF/, '')
+      const lines = cleaned.split(/\r?\n/).filter((l) => l.trim() !== '')
+      if (lines.length < 2) {
+        setError('O arquivo CSV não tem linhas suficientes.')
+        return
+      }
+      const headerLine = lines[0]
+      const commaCount = (headerLine.match(/,/g) || []).length
+      const semicolonCount = (headerLine.match(/;/g) || []).length
+      const delimiter = semicolonCount > commaCount ? ';' : ','
+
+      const parseRow = (line: string): string[] => {
+        const result: string[] = []
+        let current = ''
+        let inQuotes = false
+        for (let i = 0; i < line.length; i++) {
+          const ch = line[i]
+          if (ch === '"') {
+            if (inQuotes && line[i + 1] === '"') {
+              current += '"'
+              i++
+            } else {
+              inQuotes = !inQuotes
+            }
+          } else if (ch === delimiter && !inQuotes) {
+            result.push(current)
+            current = ''
+          } else {
+            current += ch
+          }
+        }
+        result.push(current)
+        return result
+      }
+
+      const headers = parseRow(lines[0]).map((h) => h.trim().toLowerCase())
+      const colMap: Record<string, number> = {}
+      headers.forEach((h, i) => {
+        colMap[h] = i
+      })
+
+      const get = (row: string[], key: string) => (row[colMap[key]] ?? '').trim()
+
+      const parsed: Omit<ParsedRow, 'duplicate'>[] = []
+      for (let i = 1; i < lines.length; i++) {
+        const row = parseRow(lines[i])
+        const phone = get(row, 'telefone').replace(/\D/g, '')
+        if (!phone) continue
+        parsed.push({
+          name: get(row, 'nome'),
+          phone,
+          property_type: get(row, 'tipo'),
+          location_interest: get(row, 'localizacao'),
+          bedrooms_needed: get(row, 'quartos'),
+          budget_max: get(row, 'orcamento_max'),
+          source_detail: get(row, 'origem_detalhe'),
+        })
+      }
+
+      const { data: existingData } = await supabase
+        .from('leads')
+        .select('phone')
+        .eq('organization_id', orgId)
+      const existingPhones = new Set((existingData ?? []).map((r: { phone: string }) => r.phone))
+
+      const withDuplicates: ParsedRow[] = parsed.map((r) => ({
+        ...r,
+        duplicate: existingPhones.has(r.phone),
+      }))
+
+      setRows(withDuplicates)
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Erro ao ler o arquivo.')
+    }
+  }
+
+  async function handleImport() {
+    const toInsert = ignoreDuplicates ? rows.filter((r) => !r.duplicate) : rows
+    if (toInsert.length === 0) {
+      toast.error('Nada para importar', 'Todos os leads são duplicados ou o arquivo está vazio.')
+      return
+    }
+    setImporting(true)
+    const batchSize = 50
+    for (let i = 0; i < toInsert.length; i += batchSize) {
+      const batch = toInsert.slice(i, i + batchSize).map((r) => ({
+        organization_id: orgId,
+        name: r.name || null,
+        phone: r.phone,
+        property_type: r.property_type || null,
+        location_interest: r.location_interest || null,
+        bedrooms_needed: r.bedrooms_needed ? parseInt(r.bedrooms_needed, 10) || null : null,
+        budget_max: r.budget_max ? parseFloat(r.budget_max) || null : null,
+        source_detail: r.source_detail || null,
+        source: 'import',
+        status: 'novo',
+      }))
+      const { error: insertError } = await supabase.from('leads').insert(batch as any)
+      if (insertError) {
+        setError(insertError.message)
+        setImporting(false)
+        return
+      }
+    }
+    setImporting(false)
+    toast.success('Importação concluída', `${toInsert.length} lead${toInsert.length !== 1 ? 's' : ''} importado${toInsert.length !== 1 ? 's' : ''}`)
+    onImported()
+    onClose()
+  }
+
+  const duplicateCount = rows.filter((r) => r.duplicate).length
+  const preview = rows.slice(0, 5)
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 dark:bg-black/70 backdrop-blur-sm animate-fade-in"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-2xl bg-card border border-border rounded-xl shadow-float animate-slide-in-bottom"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between px-5 py-4 border-b border-border">
+          <div className="flex items-center gap-2.5">
+            <div className="h-8 w-8 rounded-lg bg-primary-soft text-primary-soft-foreground flex items-center justify-center">
+              <Upload size={15} />
+            </div>
+            <div>
+              <h2 className="text-sm font-semibold tracking-tight">Importar leads</h2>
+              <p className="text-xs text-muted-foreground">Importe leads a partir de um arquivo CSV</p>
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            className="h-8 w-8 flex items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-subtle transition-colors"
+            aria-label="Fechar"
+          >
+            ✕
+          </button>
+        </div>
+
+        <div className="p-5 space-y-4 max-h-[70vh] overflow-y-auto">
+          {error && (
+            <div className="rounded-lg bg-destructive/10 border border-destructive/20 px-4 py-3 text-sm text-destructive">
+              {error}
+            </div>
+          )}
+
+          {!file ? (
+            <label className="block cursor-pointer">
+              <div className="border-2 border-dashed border-border rounded-xl p-10 text-center hover:border-primary hover:bg-primary-soft/10 transition-colors">
+                <Upload size={28} className="mx-auto mb-3 text-muted-foreground" />
+                <p className="text-sm font-medium text-foreground mb-1">Clique para selecionar um arquivo CSV</p>
+                <p className="text-xs text-muted-foreground">Colunas esperadas: nome, telefone, tipo, localizacao, quartos, orcamento_max, origem_detalhe</p>
+              </div>
+              <input
+                type="file"
+                accept=".csv"
+                className="sr-only"
+                onChange={(e) => {
+                  const f = e.target.files?.[0]
+                  if (f) handleFile(f)
+                }}
+              />
+            </label>
+          ) : (
+            <div className="space-y-4">
+              <div className="flex items-center justify-between">
+                <p className="text-sm text-muted-foreground">
+                  <span className="font-medium text-foreground">{rows.length} lead{rows.length !== 1 ? 's' : ''} encontrado{rows.length !== 1 ? 's' : ''}</span>
+                  {duplicateCount > 0 && <span className="ml-1">, {duplicateCount} duplicado{duplicateCount !== 1 ? 's' : ''}</span>}
+                </p>
+                <label className="text-xs text-primary cursor-pointer hover:underline">
+                  Trocar arquivo
+                  <input
+                    type="file"
+                    accept=".csv"
+                    className="sr-only"
+                    onChange={(e) => {
+                      const f = e.target.files?.[0]
+                      if (f) handleFile(f)
+                    }}
+                  />
+                </label>
+              </div>
+
+              {rows.length > 0 && (
+                <div className="rounded-lg border border-border overflow-hidden">
+                  <table className="w-full text-xs">
+                    <thead className="bg-subtle/60 border-b border-border">
+                      <tr>
+                        {['Nome', 'Telefone', 'Tipo', 'Origem', 'Status'].map((h) => (
+                          <th key={h} className="px-3 py-2 text-left text-[11px] font-medium text-muted-foreground uppercase tracking-wider">{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-border">
+                      {preview.map((row, i) => (
+                        <tr key={i} className={cn(row.duplicate && 'bg-warning/5')}>
+                          <td className="px-3 py-2 truncate max-w-[120px]">{row.name || <span className="text-muted-foreground italic">sem nome</span>}</td>
+                          <td className="px-3 py-2 tabular">{row.phone}</td>
+                          <td className="px-3 py-2 truncate max-w-[80px]">{row.property_type || '—'}</td>
+                          <td className="px-3 py-2 truncate max-w-[100px]">{row.source_detail || '—'}</td>
+                          <td className="px-3 py-2">
+                            {row.duplicate ? (
+                              <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-warning/20 text-warning-foreground border border-warning/30">
+                                Já existe
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-success/20 text-success border border-success/30">
+                                Novo
+                              </span>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {rows.length > 5 && (
+                    <div className="px-3 py-2 bg-subtle/30 border-t border-border text-[11px] text-muted-foreground">
+                      Mostrando 5 de {rows.length} linhas
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {duplicateCount > 0 && (
+                <label className="flex items-center gap-2 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={ignoreDuplicates}
+                    onChange={(e) => setIgnoreDuplicates(e.target.checked)}
+                    className="h-4 w-4 rounded border-border accent-primary"
+                  />
+                  <span className="text-sm text-foreground">Ignorar duplicados</span>
+                  <span className="text-xs text-muted-foreground">({duplicateCount} {duplicateCount !== 1 ? 'serão pulados' : 'será pulado'})</span>
+                </label>
+              )}
+            </div>
+          )}
+        </div>
+
+        <div className="px-5 py-4 border-t border-border flex items-center justify-end gap-2 bg-subtle/30 rounded-b-xl">
+          <Button variant="outline" onClick={onClose} disabled={importing}>Cancelar</Button>
+          {file && rows.length > 0 && (
+            <Button onClick={handleImport} loading={importing} disabled={importing}>
+              Importar
+            </Button>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export function Leads() {
   const { leads, loading, updateLeadStatus, deleteLead, refetch } = useLeads()
   const { profile } = useProfile()
@@ -32,6 +319,7 @@ export function Leads() {
   const [filterStatus, setFilterStatus] = useState('')
   const [selected, setSelected] = useState<Lead | null>(null)
   const [creating, setCreating] = useState(false)
+  const [importing, setImporting] = useState(false)
   const [view, setView] = useState<View>(() => {
     return (localStorage.getItem('leads.view') as View) || 'kanban'
   })
@@ -41,12 +329,10 @@ export function Leads() {
     window.addEventListener('resize', onResize)
     return () => window.removeEventListener('resize', onResize)
   }, [])
-  // Em mobile, força tabela (Kanban com drag-and-drop não funciona bem em touch em tela estreita)
   const effectiveView: View = isMobile ? 'table' : view
   const mountedAt = useRef(Date.now())
   const [searchParams, setSearchParams] = useSearchParams()
 
-  // Abre o dialog se vier de /leads?new=1 (usado pelo Command Palette)
   useEffect(() => {
     if (searchParams.get('new') === '1') {
       setCreating(true)
@@ -60,7 +346,6 @@ export function Leads() {
     localStorage.setItem('leads.view', v)
   }
 
-  // Atalho de teclado: N pra novo lead (quando nao ha modal aberto e nao esta em input)
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (e.key !== 'n' && e.key !== 'N') return
@@ -75,7 +360,6 @@ export function Leads() {
     return () => window.removeEventListener('keydown', onKey)
   }, [selected, creating])
 
-  // Toast em tempo real quando um NOVO lead chega (ignora o snapshot inicial)
   useEffect(() => {
     const orgId = profile?.organization_id
     if (!orgId) return
@@ -85,7 +369,6 @@ export function Leads() {
         'postgres_changes',
         { event: 'INSERT', schema: 'public', table: 'leads', filter: `organization_id=eq.${orgId}` },
         (payload) => {
-          // Ignora eventos que chegam logo na montagem (hydratation)
           if (Date.now() - mountedAt.current < 2500) return
           const lead = payload.new as Lead
           const origem = lead.source === 'whatsapp' ? 'via WhatsApp' : 'manualmente'
@@ -175,6 +458,15 @@ export function Leads() {
               <Radio size={11} className="text-success animate-pulse" />
               Tempo real
             </span>
+            <Button
+              variant="outline"
+              size="md"
+              leftIcon={<Upload size={14} />}
+              onClick={() => setImporting(true)}
+              title="Importar leads de CSV"
+            >
+              Importar
+            </Button>
             <Button
               variant="outline"
               size="md"
@@ -391,6 +683,13 @@ export function Leads() {
       )}
       {creating && (
         <LeadCreateDialog onClose={() => setCreating(false)} onCreated={refetch} />
+      )}
+      {importing && profile?.organization_id && (
+        <LeadImportDialog
+          onClose={() => setImporting(false)}
+          onImported={() => { refetch(); setImporting(false) }}
+          orgId={profile.organization_id}
+        />
       )}
     </div>
   )
