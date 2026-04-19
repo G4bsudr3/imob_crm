@@ -508,6 +508,7 @@ export type Database = {
           avatar_url: string | null
           updated_at: string
           organization_id: string | null
+          last_assigned_at: string | null
         }
         Insert: {
           created_at?: string
@@ -519,6 +520,7 @@ export type Database = {
           avatar_url?: string | null
           updated_at?: string
           organization_id?: string | null
+          last_assigned_at?: string | null
         }
         Update: {
           created_at?: string
@@ -530,6 +532,7 @@ export type Database = {
           avatar_url?: string | null
           updated_at?: string
           organization_id?: string | null
+          last_assigned_at?: string | null
         }
         Relationships: []
       }
