@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { supabase } from '../lib/supabase'
 import type { Appointment } from '../types/database'
 import { useProfile } from './useProfile'
@@ -8,28 +8,38 @@ export type AppointmentWithLead = Appointment & {
   properties: { title: string; location: string } | null
 }
 
+const POLL_INTERVAL_MS = 30_000
+
 export function useAppointments() {
   const { profile } = useProfile()
   const orgId = profile?.organization_id ?? null
   const [appointments, setAppointments] = useState<AppointmentWithLead[]>([])
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
   const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null)
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
-  async function fetchAppointments() {
+  const fetchAppointments = useCallback(async () => {
     if (!orgId) {
       setAppointments([])
       setLoading(false)
       return
     }
     setLoading(true)
-    const { data } = await supabase
+    const { data, error: qErr } = await supabase
       .from('appointments')
       .select('*, leads(name, phone), properties(title, location)')
       .eq('organization_id', orgId)
       .order('scheduled_at', { ascending: true })
-    setAppointments((data as AppointmentWithLead[]) ?? [])
+    if (qErr) {
+      console.error('[useAppointments] fetch error:', qErr.message)
+      setError(qErr.message)
+    } else {
+      setError(null)
+      setAppointments((data as AppointmentWithLead[]) ?? [])
+    }
     setLoading(false)
-  }
+  }, [orgId])
 
   async function updateStatus(id: string, status: string) {
     const prev = appointments
@@ -58,8 +68,9 @@ export function useAppointments() {
     return error
   }
 
-  useEffect(() => { fetchAppointments() }, [orgId])
+  useEffect(() => { fetchAppointments() }, [fetchAppointments])
 
+  // Realtime subscription for live updates
   useEffect(() => {
     if (!orgId) return
     if (channelRef.current) {
@@ -71,10 +82,7 @@ export function useAppointments() {
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'appointments', filter: `organization_id=eq.${orgId}` },
-        () => {
-          // Refetch mantém os joins (leads + properties) sincronizados
-          fetchAppointments()
-        },
+        () => { fetchAppointments() },
       )
       .subscribe()
     channelRef.current = channel
@@ -82,7 +90,19 @@ export function useAppointments() {
       supabase.removeChannel(channel)
       channelRef.current = null
     }
-  }, [orgId])
+  }, [orgId, fetchAppointments])
 
-  return { appointments, loading, refetch: fetchAppointments, updateStatus, createAppointment }
+  // Polling fallback: realtime postgres_changes with nested-subquery RLS policies
+  // can silently drop events. A 30s poll guarantees eventual consistency.
+  useEffect(() => {
+    if (!orgId) return
+    if (pollRef.current) clearInterval(pollRef.current)
+    pollRef.current = setInterval(() => { fetchAppointments() }, POLL_INTERVAL_MS)
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current)
+      pollRef.current = null
+    }
+  }, [orgId, fetchAppointments])
+
+  return { appointments, loading, error, refetch: fetchAppointments, updateStatus, createAppointment }
 }

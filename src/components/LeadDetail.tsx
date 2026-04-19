@@ -1,13 +1,13 @@
 import { useEffect, useState } from 'react'
-import { X, Save, MessageSquare, User, Calendar, Phone, Bot, BotOff } from 'lucide-react'
+import { X, Save, MessageSquare, User, Calendar, Phone, Bot, BotOff, MapPin } from 'lucide-react'
 import { supabase } from '../lib/supabase'
 import type { Lead, Conversation } from '../types/database'
-import { formatDate, formatTime } from '../lib/utils'
+import { formatDate, formatTime, cn, STATUS_APPT_LABELS, STATUS_APPT_VARIANTS } from '../lib/utils'
 import { Button } from './ui/Button'
 import { Field, Input, Textarea } from './ui/Input'
+import { Badge } from './ui/Badge'
 import { Card } from './ui/Card'
 import { useToast } from './ui/Toast'
-import { cn } from '../lib/utils'
 
 const PAUSE_REASON_LABEL: Record<string, string> = {
   visita_agendada: 'visita agendada',
@@ -34,6 +34,8 @@ export function LeadDetail({ lead, onClose, onSaved }: Props) {
   })
   const [conversations, setConversations] = useState<Conversation[]>([])
   const [loadingConv, setLoadingConv] = useState(true)
+  const [leadAppointments, setLeadAppointments] = useState<Array<{ id: string; scheduled_at: string; status: string; notes: string | null; properties: { title: string; location: string } | null }>>([])
+  const [loadingAppts, setLoadingAppts] = useState(true)
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
   const [botPaused, setBotPaused] = useState(lead.bot_paused ?? false)
@@ -55,6 +57,18 @@ export function LeadDetail({ lead, onClose, onSaved }: Props) {
       .then(({ data }) => {
         setConversations(data ?? [])
         setLoadingConv(false)
+      })
+  }, [lead.id])
+
+  useEffect(() => {
+    supabase
+      .from('appointments')
+      .select('id, scheduled_at, status, notes, properties(title, location)')
+      .eq('lead_id', lead.id)
+      .order('scheduled_at', { ascending: false })
+      .then(({ data }) => {
+        setLeadAppointments((data as typeof leadAppointments) ?? [])
+        setLoadingAppts(false)
       })
   }, [lead.id])
 
@@ -162,6 +176,46 @@ export function LeadDetail({ lead, onClose, onSaved }: Props) {
               </Button>
             </div>
           </Card>
+
+          {/* agendamentos do lead */}
+          {(loadingAppts || leadAppointments.length > 0) && (
+            <Card className="overflow-hidden">
+              <div className="px-5 pt-5 pb-3 border-b border-border flex items-center gap-2">
+                <Calendar size={13} className="text-muted-foreground" />
+                <p className="text-sm font-semibold tracking-tight">Visitas agendadas</p>
+                <span className="text-[11px] text-muted-foreground ml-auto tabular">{leadAppointments.length}</span>
+              </div>
+              <div className="divide-y divide-border">
+                {loadingAppts ? (
+                  <p className="text-sm text-muted-foreground p-5">Carregando...</p>
+                ) : (
+                  leadAppointments.map((a) => (
+                    <div key={a.id} className="px-5 py-3 flex items-start gap-3">
+                      <div className="h-8 w-8 rounded-lg bg-warning-soft text-warning flex items-center justify-center shrink-0 text-center mt-0.5">
+                        <div>
+                          <p className="text-[8px] leading-none font-semibold uppercase tracking-wider">{new Date(a.scheduled_at).toLocaleDateString('pt-BR', { month: 'short' })}</p>
+                          <p className="text-xs leading-tight font-bold tabular">{new Date(a.scheduled_at).getDate()}</p>
+                        </div>
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-xs font-medium">{formatDate(a.scheduled_at)}</p>
+                        {a.properties && (
+                          <p className="text-[11px] text-muted-foreground flex items-center gap-1 truncate mt-0.5">
+                            <MapPin size={10} className="shrink-0" />
+                            <span className="truncate">{a.properties.title}</span>
+                          </p>
+                        )}
+                        {a.notes && <p className="text-[11px] text-muted-foreground mt-0.5 truncate">{a.notes}</p>}
+                      </div>
+                      <Badge variant={STATUS_APPT_VARIANTS[a.status] ?? 'neutral'} dot>
+                        {STATUS_APPT_LABELS[a.status] ?? a.status}
+                      </Badge>
+                    </div>
+                  ))
+                )}
+              </div>
+            </Card>
+          )}
 
           {/* dados do lead */}
           <Card className="overflow-hidden">
