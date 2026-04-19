@@ -9,7 +9,7 @@ import { useWhatsappGroup } from '../hooks/useWhatsappGroup'
 import {
   MessageSquare, Save, Zap, Clock, Smartphone, QrCode, CheckCircle, AlertCircle,
   Info, RefreshCw, LogOut, Wifi, WifiOff, Loader2, Bell, ArrowRight,
-  Users, Calendar, TrendingUp, DollarSign, UserCheck, Activity,
+  Users, Calendar, TrendingUp, DollarSign, UserCheck, Activity, Eye, X,
 } from 'lucide-react'
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, Legend } from 'recharts'
 import { Button } from '../components/ui/Button'
@@ -142,6 +142,7 @@ export function BotConfig() {
   const [saved, setSaved] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [activeTab, setActiveTab] = useState<Tab>('conexao')
+  const [showPrompt, setShowPrompt] = useState(false)
 
   useEffect(() => {
     if (!orgId) {
@@ -413,6 +414,12 @@ export function BotConfig() {
                 />
               </div>
             </details>
+
+            <div className="flex justify-end">
+              <Button variant="outline" size="sm" leftIcon={<Eye size={13} />} onClick={() => setShowPrompt(true)}>
+                Visualizar prompt gerado
+              </Button>
+            </div>
           </div>
         )}
 
@@ -470,8 +477,58 @@ export function BotConfig() {
 
       {/* Métricas do bot (últimos 7 dias) — visível em qualquer aba */}
       <BotMetricsCard />
+
+      {showPrompt && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm" onClick={() => setShowPrompt(false)}>
+          <div className="w-full max-w-2xl bg-card border border-border rounded-xl shadow-float flex flex-col max-h-[80vh]" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-5 py-4 border-b border-border">
+              <p className="text-sm font-semibold">Prompt gerado pelo bot</p>
+              <button onClick={() => setShowPrompt(false)} className="text-muted-foreground hover:text-foreground"><X size={16} /></button>
+            </div>
+            <pre className="flex-1 overflow-auto p-5 text-xs font-mono text-muted-foreground whitespace-pre-wrap leading-relaxed">
+              {buildPromptPreview(config)}
+            </pre>
+            <div className="px-5 py-3 border-t border-border">
+              <p className="text-[11px] text-muted-foreground">Este é um resumo simplificado. O prompt real inclui calendário dinâmico e dados do lead.</p>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
+}
+
+function buildPromptPreview(config: BotConfig): string {
+  const style = { casual: 'Casual — descontraído', balanced: 'Equilibrado — amigável profissional', formal: 'Formal — profissional' }[config.communication_style ?? 'balanced']
+  const caps = [
+    config.can_schedule ? '✓ Pode agendar visitas' : '✗ Não agenda (coleta preferência)',
+    config.can_escalate ? '✓ Pode escalar para humano' : '✗ Não escala',
+    config.can_negotiate_price ? '✓ Pode negociar preços' : '✗ Não negocia valores',
+    config.show_listing_links ? '✓ Envia links de anúncios' : '✗ Não envia links',
+    config.auto_assign ? '✓ Round-robin ativo' : '✗ Round-robin inativo',
+  ].join('\n')
+
+  const lines = [
+    '# Sistema',
+    'Você é um atendente virtual de uma imobiliária.',
+    '',
+    `# Tom: ${style}`,
+    '',
+    '# Capacidades',
+    caps,
+    '',
+    `# Máx. imóveis por resposta: ${config.max_properties_shown ?? 3}`,
+  ]
+  if (config.service_areas) lines.push('', `# Regiões: ${config.service_areas}`)
+  if (config.company_differentials) lines.push('', `# Diferenciais: ${config.company_differentials}`)
+  if (config.persona) lines.push('', '# Instruções avançadas (persona)', config.persona)
+  else {
+    const msgs = [config.welcome_message, config.triagem_localizacao, config.triagem_tipo, config.triagem_orcamento, config.triagem_quartos].filter(Boolean)
+    if (msgs.length > 0) lines.push('', '# Instruções do time', ...msgs)
+  }
+  lines.push('', '# Lead (preenchido em tempo real)', '- Nome, telefone, preferências, histórico de mensagens...')
+  lines.push('', '# Calendário (gerado automaticamente)', '- Próximos 14 dias em BRT')
+  return lines.join('\n')
 }
 
 // =====================================================================

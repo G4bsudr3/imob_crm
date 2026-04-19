@@ -317,6 +317,8 @@ export function Leads() {
   const toast = useToast()
   const [search, setSearch] = useState('')
   const [filterStatus, setFilterStatus] = useState('')
+  const [filterAgent, setFilterAgent] = useState('')
+  const [agents, setAgents] = useState<Array<{id: string; name: string | null; email: string | null}>>([])
   const [selected, setSelected] = useState<Lead | null>(null)
   const [creating, setCreating] = useState(false)
   const [importing, setImporting] = useState(false)
@@ -381,6 +383,15 @@ export function Leads() {
     }
   }, [profile?.organization_id, toast])
 
+  useEffect(() => {
+    if (!profile?.organization_id) return
+    supabase
+      .from('profiles')
+      .select('id, name, email')
+      .eq('organization_id', profile.organization_id)
+      .then(({ data }) => setAgents(data ?? []))
+  }, [profile?.organization_id])
+
   async function handleDelete(lead: Lead) {
     const ok = await confirm({
       title: 'Remover lead?',
@@ -409,7 +420,8 @@ export function Leads() {
       l.phone.includes(search) ||
       (l.name ?? '').toLowerCase().includes(search.toLowerCase())
     const matchStatus = !filterStatus || l.status === filterStatus
-    return matchSearch && matchStatus
+    const matchAgent = !filterAgent || l.assigned_to === filterAgent
+    return matchSearch && matchStatus && matchAgent
   })
 
   function handleExportCsv() {
@@ -535,6 +547,18 @@ export function Leads() {
             <option value="">Todos os status</option>
             {STATUS_OPTIONS.map((s) => (
               <option key={s} value={s}>{STATUS_LEAD_LABELS[s]}</option>
+            ))}
+          </Select>
+        )}
+        {agents.length > 0 && (
+          <Select
+            value={filterAgent}
+            onChange={(e) => setFilterAgent(e.target.value)}
+            className="w-48"
+          >
+            <option value="">Todos os corretores</option>
+            {agents.map((a) => (
+              <option key={a.id} value={a.id}>{a.name ?? a.email ?? a.id}</option>
             ))}
           </Select>
         )}

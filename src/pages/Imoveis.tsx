@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import {
   Plus, Trash2, Home, MapPin, BedDouble, Bath, Ruler, Pencil, X, Car, Layers,
-  Calendar as CalendarIcon, Sparkles, Search, ExternalLink, ImagePlus, Star,
+  Calendar as CalendarIcon, Sparkles, Search, ExternalLink, ImagePlus, Star, Users,
 } from 'lucide-react'
 import { useProperties, type PropertyInput } from '../hooks/useProperties'
 import { useProfile } from '../hooks/useProfile'
@@ -216,6 +216,7 @@ const PROPERTY_FORM_SECTIONS: { id: string; label: string }[] = [
   { id: 'sec-midia', label: 'Mídia' },
   { id: 'sec-fotos', label: 'Fotos' },
   { id: 'sec-notas', label: 'Notas' },
+  { id: 'sec-compat', label: 'Leads compat.' },
 ]
 
 function PropertyFormNav() {
@@ -279,6 +280,9 @@ export function Imoveis() {
   const [photos, setPhotos] = useState<PhotoRow[]>([])
   const [uploadingPhotos, setUploadingPhotos] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
+
+  const [compatLeads, setCompatLeads] = useState<Array<{id:string;name:string|null;phone:string;status:string;budget_max:number|null;bedrooms_needed:number|null;location_interest:string|null}> | null>(null)
+  const [loadingCompatLeads, setLoadingCompatLeads] = useState(false)
 
   const isEditing = typeof mode === 'object'
   const editingId = isEditing ? mode.edit : null
@@ -435,6 +439,37 @@ export function Imoveis() {
     await supabase.from('property_photos').update({ is_cover: false }).eq('property_id', editingId)
     await supabase.from('property_photos').update({ is_cover: true }).eq('id', photoId)
     setPhotos((prev) => prev.map((p) => ({ ...p, is_cover: p.id === photoId })))
+  }
+
+  async function loadCompatibleLeads() {
+    if (!orgId || loadingCompatLeads) return
+    setLoadingCompatLeads(true)
+    const propertyPrice = parseFloat(form.price) || parseFloat(form.rent_price) || 0
+    const propertyBedrooms = parseInt(form.bedrooms) || 0
+
+    let q = supabase
+      .from('leads')
+      .select('id, name, phone, status, budget_max, bedrooms_needed, location_interest, property_type')
+      .eq('organization_id', orgId)
+      .not('status', 'in', '("descartado","convertido")')
+      .limit(10)
+    if (form.type) q = q.or(`property_type.is.null,property_type.eq.${form.type}`)
+    const { data } = await q
+
+    // Filter in JS for budget + bedrooms (same logic as outbound-reengagement)
+    const matched = (data ?? []).filter((lead) => {
+      if (lead.budget_max != null && propertyPrice > 0 && lead.budget_max < propertyPrice * 0.85) return false
+      if (lead.bedrooms_needed != null && propertyBedrooms > 0 && propertyBedrooms < lead.bedrooms_needed) return false
+      if (lead.location_interest) {
+        const interest = lead.location_interest.toLowerCase()
+        const cityOk = form.city ? interest.includes(form.city.toLowerCase()) : false
+        const neighOk = form.neighborhood ? interest.includes(form.neighborhood.toLowerCase()) : false
+        if (!cityOk && !neighOk) return false
+      }
+      return true
+    })
+    setCompatLeads(matched)
+    setLoadingCompatLeads(false)
   }
 
   const rentsIncluded = form.listing_purpose === 'rent' || form.listing_purpose === 'both'
@@ -757,6 +792,40 @@ export function Imoveis() {
                 onChange={(e) => setForm((f) => ({ ...f, internal_notes: e.target.value }))}
                 placeholder="Proprietário aceita negociar até 5%. Chaves na portaria..." />
             </Field>
+          </Section>
+
+          {/* -------- 9. Leads compatíveis -------- */}
+          <Section id="sec-compat" title="Leads compatíveis">
+            <div id="sec-compat-inner">
+              <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-3">Leads compatíveis</p>
+              {!editingId ? (
+                <p className="text-xs text-muted-foreground">Salve o imóvel primeiro para ver leads compatíveis.</p>
+              ) : (
+                <>
+                  <Button variant="outline" size="sm" onClick={() => { if (compatLeads) setCompatLeads(null); else loadCompatibleLeads() }} loading={loadingCompatLeads} className="mb-3 w-full">
+                    <Users size={13} className="mr-1.5" />{compatLeads ? 'Ocultar' : 'Buscar leads compatíveis'}
+                  </Button>
+                  {compatLeads !== null && (
+                    compatLeads.length === 0 ? (
+                      <p className="text-xs text-muted-foreground">Nenhum lead ativo compatível com este imóvel.</p>
+                    ) : (
+                      <div className="space-y-2">
+                        {compatLeads.map((lead) => (
+                          <div key={lead.id} className="rounded-lg border border-border bg-card px-3 py-2">
+                            <div className="flex items-center justify-between gap-2">
+                              <p className="text-sm font-medium truncate">{lead.name ?? lead.phone}</p>
+                              <span className="text-[11px] text-muted-foreground shrink-0">{lead.status}</span>
+                            </div>
+                            <p className="text-xs text-muted-foreground">{lead.phone}</p>
+                            {lead.budget_max && <p className="text-[11px] text-muted-foreground">Orç. máx: R$ {lead.budget_max.toLocaleString('pt-BR')}</p>}
+                          </div>
+                        ))}
+                      </div>
+                    )
+                  )}
+                </>
+              )}
+            </div>
           </Section>
 
           {error && (

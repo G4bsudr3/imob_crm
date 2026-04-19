@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { X, Save, MessageSquare, User, Calendar, Phone, Bot, BotOff, MapPin, Trophy, Send, ChevronUp } from 'lucide-react'
+import { X, Save, MessageSquare, User, Calendar, Phone, Bot, BotOff, MapPin, Trophy, Send, ChevronUp, Home } from 'lucide-react'
 import { supabase } from '../lib/supabase'
 import type { Lead, Conversation } from '../types/database'
 import { formatDate, formatTime, cn, STATUS_APPT_LABELS, STATUS_APPT_VARIANTS, formatCurrency } from '../lib/utils'
@@ -53,6 +53,8 @@ export function LeadDetail({ lead, onClose, onSaved }: Props) {
   })
   const [properties, setProperties] = useState<Array<{ id: string; title: string }>>([])
   const [savingDeal, setSavingDeal] = useState(false)
+  const [compatProps, setCompatProps] = useState<Array<{id:string;title:string;type:string;price:number|null;rent_price:number|null;bedrooms:number|null;location:string|null;neighborhood:string|null}> | null>(null)
+  const [loadingCompatProps, setLoadingCompatProps] = useState(false)
 
   // Sincroniza com updates do lead via realtime (pai reabre/rehidrata via useLeads).
   // Sem isso, se `lead.bot_paused` muda fora do Detail (ex: bot pausou automaticamente ao agendar),
@@ -195,6 +197,23 @@ export function LeadDetail({ lead, onClose, onSaved }: Props) {
     }
     toast.success('Negócio salvo')
     onSaved()
+  }
+
+  async function loadCompatibleProperties() {
+    if (loadingCompatProps) return
+    setLoadingCompatProps(true)
+    let q = supabase
+      .from('properties')
+      .select('id, title, type, price, rent_price, bedrooms, location, neighborhood')
+      .eq('organization_id', lead.organization_id!)
+      .eq('listing_status', 'available')
+      .limit(5)
+    if (lead.property_type) q = q.eq('type', lead.property_type)
+    if (lead.bedrooms_needed) q = q.gte('bedrooms', lead.bedrooms_needed)
+    if (lead.budget_max) q = q.lte('price', lead.budget_max * 1.15) // 15% buffer
+    const { data } = await q.order('featured', { ascending: false })
+    setCompatProps(data ?? [])
+    setLoadingCompatProps(false)
   }
 
   const initials = (form.name || form.phone).slice(0, 2).toUpperCase()
@@ -382,6 +401,46 @@ export function LeadDetail({ lead, onClose, onSaved }: Props) {
               </div>
             </Card>
           )}
+
+          {/* imóveis compatíveis */}
+          <Card className="overflow-hidden">
+            <button
+              className="w-full flex items-center justify-between px-4 py-3 text-sm font-medium hover:bg-subtle/50 transition-colors"
+              onClick={() => { if (!compatProps) loadCompatibleProperties(); else setCompatProps(null) }}
+            >
+              <div className="flex items-center gap-2">
+                <Home size={14} className="text-muted-foreground" />
+                <span>Imóveis compatíveis</span>
+                {compatProps && <span className="text-xs text-muted-foreground font-normal">({compatProps.length} encontrado{compatProps.length !== 1 ? 's' : ''})</span>}
+              </div>
+              <ChevronUp size={14} className={cn('text-muted-foreground transition-transform', !compatProps && 'rotate-180')} />
+            </button>
+            {compatProps !== null && (
+              <div className="border-t border-border">
+                {loadingCompatProps ? (
+                  <p className="px-4 py-3 text-xs text-muted-foreground">Buscando...</p>
+                ) : compatProps.length === 0 ? (
+                  <p className="px-4 py-3 text-xs text-muted-foreground">Nenhum imóvel disponível compatível com o perfil deste lead.</p>
+                ) : (
+                  <div className="divide-y divide-border">
+                    {compatProps.map((p) => (
+                      <div key={p.id} className="px-4 py-3 flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="text-sm font-medium truncate">{p.title}</p>
+                          <p className="text-xs text-muted-foreground truncate">{[p.location, p.neighborhood].filter(Boolean).join(' · ')}</p>
+                        </div>
+                        <div className="shrink-0 text-right">
+                          {p.price ? <p className="text-xs font-medium">{formatCurrency(p.price)}</p> : null}
+                          {p.rent_price ? <p className="text-xs text-muted-foreground">{formatCurrency(p.rent_price)}/mês</p> : null}
+                          {p.bedrooms ? <p className="text-[11px] text-muted-foreground">{p.bedrooms} quarto{p.bedrooms !== 1 ? 's' : ''}</p> : null}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </Card>
 
           {/* dados do lead */}
           <Card className="overflow-hidden">
