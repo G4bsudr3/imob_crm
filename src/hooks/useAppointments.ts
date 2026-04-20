@@ -70,23 +70,11 @@ export function useAppointments() {
       .single()
     if (!error) {
       fetchAppointments()
-      // Fire-and-forget Google Calendar sync (no token needed client-side)
+      // Fire-and-forget Google Calendar sync
       if (inserted?.id) {
-        supabase.auth.getSession().then(({ data: { session } }) => {
-          if (!session) return
-          fetch(
-            `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/sync-appointment-gcal`,
-            {
-              method: 'POST',
-              headers: {
-                Authorization: `Bearer ${session.access_token}`,
-                apikey: import.meta.env.VITE_SUPABASE_ANON_KEY as string,
-                'Content-Type': 'application/json',
-              },
-              body: JSON.stringify({ appointment_id: inserted.id }),
-            },
-          ).catch(() => { /* non-critical */ })
-        })
+        supabase.functions
+          .invoke('sync-appointment-gcal', { body: { appointment_id: inserted.id } })
+          .catch(() => { /* non-critical */ })
       }
     }
     return error
