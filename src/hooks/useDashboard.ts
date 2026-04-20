@@ -20,6 +20,14 @@ export interface DashboardStats {
     lead_phone: string
     property_title: string | null
   }[]
+  agentPerformance: {
+    agent_id: string
+    agent_name: string | null
+    agent_email: string
+    total: number
+    agendados: number
+    convertidos: number
+  }[]
 }
 
 export function useDashboard() {
@@ -39,7 +47,7 @@ export function useDashboard() {
       const inicio2Semanas = new Date(hoje.getTime() - 14 * 24 * 60 * 60 * 1000).toISOString()
       const fim7d = new Date(hoje.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString()
 
-      const [leadsRes, novosSemana, novosSemanaAnterior, agendHoje, agendProximos, imoveisRes, ultimosRes, proximasRes] = await Promise.all([
+      const [leadsRes, novosSemana, novosSemanaAnterior, agendHoje, agendProximos, imoveisRes, ultimosRes, proximasRes, agentLeadsRes] = await Promise.all([
         supabase.from('leads').select('status'),
         supabase.from('leads').select('id', { count: 'exact', head: true }).gte('created_at', inicioSemana),
         supabase.from('leads').select('id', { count: 'exact', head: true }).gte('created_at', inicio2Semanas).lt('created_at', inicioSemana),
@@ -55,6 +63,12 @@ export function useDashboard() {
           .neq('status', 'realizado')
           .order('scheduled_at', { ascending: true })
           .limit(4),
+        supabase
+          .from('leads')
+          .select('assigned_to, status, profiles!leads_assigned_to_fkey(id, name, email)')
+          .eq('organization_id', orgId)
+          .not('assigned_to', 'is', null)
+          .neq('status', 'descartado'),
       ])
 
       const leads = leadsRes.data ?? []
@@ -68,6 +82,19 @@ export function useDashboard() {
       const trend = novosSemanaPassada === 0
         ? (novosEssaSemana > 0 ? 100 : 0)
         : Math.round(((novosEssaSemana - novosSemanaPassada) / novosSemanaPassada) * 100)
+
+      const agentMap: Record<string, { agent_id: string; agent_name: string | null; agent_email: string; total: number; agendados: number; convertidos: number }> = {}
+      for (const l of agentLeadsRes.data ?? []) {
+        const agent = Array.isArray(l.profiles) ? l.profiles[0] : l.profiles as any
+        if (!l.assigned_to || !agent) continue
+        if (!agentMap[l.assigned_to]) {
+          agentMap[l.assigned_to] = { agent_id: l.assigned_to, agent_name: agent.name, agent_email: agent.email, total: 0, agendados: 0, convertidos: 0 }
+        }
+        agentMap[l.assigned_to].total++
+        if (l.status === 'agendado') agentMap[l.assigned_to].agendados++
+        if (l.status === 'convertido') agentMap[l.assigned_to].convertidos++
+      }
+      const agentPerformance = Object.values(agentMap).sort((a, b) => b.convertidos - a.convertidos || b.total - a.total)
 
       setStats({
         totalLeads: leads.length,
@@ -87,6 +114,7 @@ export function useDashboard() {
           lead_phone: a.leads?.phone ?? '',
           property_title: a.properties?.title ?? null,
         })),
+        agentPerformance,
       })
       setLoading(false)
   }, [orgId])

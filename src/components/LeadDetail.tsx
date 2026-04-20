@@ -1,18 +1,22 @@
 import { useEffect, useState } from 'react'
-import { X, Save, MessageSquare, User, Calendar, Phone, Bot, BotOff, MapPin, Trophy, Send, ChevronUp, Home } from 'lucide-react'
+import { X, Save, MessageSquare, User, Calendar, Phone, Bot, BotOff, MapPin, Trophy, Send, ChevronUp, Home, CheckSquare, Clock, ArrowRight, UserCheck, Info, Trash2 } from 'lucide-react'
 import { supabase } from '../lib/supabase'
 import type { Lead, Conversation } from '../types/database'
-import { formatDate, formatTime, cn, STATUS_APPT_LABELS, STATUS_APPT_VARIANTS, formatCurrency } from '../lib/utils'
+import { formatDate, formatTime, cn, STATUS_APPT_LABELS, STATUS_APPT_VARIANTS, formatCurrency, STATUS_LEAD_LABELS } from '../lib/utils'
 import { Button } from './ui/Button'
 import { Field, Input, Textarea } from './ui/Input'
 import { Badge } from './ui/Badge'
 import { Card } from './ui/Card'
 import { useToast } from './ui/Toast'
+import { useProfile } from '../hooks/useProfile'
 
 const PAUSE_REASON_LABEL: Record<string, string> = {
   visita_agendada: 'visita agendada',
   escalado_humano: 'lead pediu atendente humano',
 }
+
+type LeadTask = { id: string; title: string; due_date: string | null; completed_at: string | null; created_at: string }
+type AuditEntry = { id: number; action: string; metadata: any; actor_email: string | null; created_at: string }
 
 type CompatProp = {
   id: string; title: string; type: string
@@ -55,6 +59,19 @@ type Props = {
 
 export function LeadDetail({ lead, onClose, onSaved }: Props) {
   const toast = useToast()
+  const { profile } = useProfile()
+
+  // Tasks state
+  const [tasks, setTasks] = useState<LeadTask[]>([])
+  const [loadingTasks, setLoadingTasks] = useState(true)
+  const [taskTitle, setTaskTitle] = useState('')
+  const [taskDueDate, setTaskDueDate] = useState('')
+  const [savingTask, setSavingTask] = useState(false)
+
+  // Audit log state
+  const [auditEntries, setAuditEntries] = useState<AuditEntry[]>([])
+  const [loadingAudit, setLoadingAudit] = useState(true)
+
   const [form, setForm] = useState({
     name: lead.name ?? '',
     phone: lead.phone ?? '',
@@ -260,6 +277,71 @@ export function LeadDetail({ lead, onClose, onSaved }: Props) {
     }, 500)
     return () => clearTimeout(timer)
   }, [form.property_type, form.budget_max, form.bedrooms_needed, form.location_interest, lead.organization_id])
+
+  useEffect(() => {
+    supabase
+      .from('lead_tasks')
+      .select('*')
+      .eq('lead_id', lead.id)
+      .order('due_date', { ascending: true, nullsFirst: false })
+      .then(({ data }) => {
+        setTasks((data as LeadTask[]) ?? [])
+        setLoadingTasks(false)
+      })
+  }, [lead.id])
+
+  useEffect(() => {
+    supabase
+      .from('audit_logs')
+      .select('id, action, metadata, actor_email, created_at')
+      .eq('target_type', 'lead')
+      .eq('target_id', lead.id)
+      .order('created_at', { ascending: false })
+      .limit(10)
+      .then(({ data }) => {
+        setAuditEntries((data as AuditEntry[]) ?? [])
+        setLoadingAudit(false)
+      })
+  }, [lead.id])
+
+  async function handleAddTask() {
+    const title = taskTitle.trim()
+    if (!title) return
+    setSavingTask(true)
+    const { data, error } = await supabase
+      .from('lead_tasks')
+      .insert({ organization_id: lead.organization_id!, lead_id: lead.id, title, due_date: taskDueDate || null, created_by: profile?.id ?? null })
+      .select('*')
+      .single()
+    setSavingTask(false)
+    if (error) {
+      toast.error('Erro ao criar tarefa', error.message)
+      return
+    }
+    setTasks((prev) => [...prev, data as LeadTask].sort((a, b) => {
+      if (!a.due_date && !b.due_date) return 0
+      if (!a.due_date) return 1
+      if (!b.due_date) return -1
+      return a.due_date.localeCompare(b.due_date)
+    }))
+    setTaskTitle('')
+    setTaskDueDate('')
+  }
+
+  async function handleToggleTask(taskId: string, completed_at: string | null) {
+    const { error } = await supabase
+      .from('lead_tasks')
+      .update({ completed_at: completed_at ? null : new Date().toISOString() })
+      .eq('id', taskId)
+    if (error) { toast.error('Erro ao atualizar tarefa', error.message); return }
+    setTasks((prev) => prev.map((t) => t.id === taskId ? { ...t, completed_at: completed_at ? null : new Date().toISOString() } : t))
+  }
+
+  async function handleDeleteTask(taskId: string) {
+    const { error } = await supabase.from('lead_tasks').delete().eq('id', taskId)
+    if (error) { toast.error('Erro ao excluir tarefa', error.message); return }
+    setTasks((prev) => prev.filter((t) => t.id !== taskId))
+  }
 
   const initials = (form.name || form.phone).slice(0, 2).toUpperCase()
   const hasMoreConv = convTotal === Infinity || (convTotal !== null && convTotal > conversations.length)
@@ -538,6 +620,127 @@ export function LeadDetail({ lead, onClose, onSaved }: Props) {
                   {saved ? 'Salvo' : 'Salvar'}
                 </Button>
               </div>
+            </div>
+          </Card>
+
+          {/* tarefas */}
+          <Card className="overflow-hidden">
+            <div className="px-5 pt-5 pb-3 border-b border-border flex items-center gap-2">
+              <CheckSquare size={13} className="text-muted-foreground" />
+              <p className="text-sm font-semibold tracking-tight">Tarefas</p>
+              <span className="text-[11px] text-muted-foreground ml-auto tabular">{tasks.length}</span>
+            </div>
+            <div className="p-5 space-y-3">
+              {/* inline form */}
+              <div className="flex items-center gap-2">
+                <Input
+                  placeholder="Nova tarefa..."
+                  value={taskTitle}
+                  onChange={(e) => setTaskTitle(e.target.value)}
+                  className="flex-1"
+                  onKeyDown={(e) => { if (e.key === 'Enter') handleAddTask() }}
+                />
+                <Input
+                  type="date"
+                  value={taskDueDate}
+                  onChange={(e) => setTaskDueDate(e.target.value)}
+                  className="w-36"
+                />
+                <Button
+                  size="sm"
+                  onClick={handleAddTask}
+                  loading={savingTask}
+                  disabled={!taskTitle.trim()}
+                >
+                  +
+                </Button>
+              </div>
+              {/* task list */}
+              {loadingTasks ? (
+                <p className="text-sm text-muted-foreground">Carregando...</p>
+              ) : tasks.length === 0 ? (
+                <p className="text-sm text-muted-foreground text-center py-3">Nenhuma tarefa cadastrada.</p>
+              ) : (
+                <div className="space-y-1">
+                  {tasks.map((t) => {
+                    const overdue = !t.completed_at && t.due_date && t.due_date < new Date().toISOString().slice(0, 10)
+                    return (
+                      <div
+                        key={t.id}
+                        className={cn('flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-subtle/50 group', t.completed_at && 'opacity-50')}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={!!t.completed_at}
+                          onChange={() => handleToggleTask(t.id, t.completed_at)}
+                          className="h-4 w-4 rounded border-border accent-primary cursor-pointer"
+                        />
+                        <span className={cn('flex-1 text-sm truncate', t.completed_at && 'line-through text-muted-foreground')}>
+                          {t.title}
+                        </span>
+                        {t.due_date && (
+                          <span className={cn('text-[11px] tabular shrink-0', overdue ? 'text-destructive font-medium' : 'text-muted-foreground')}>
+                            {formatDate(t.due_date)}
+                          </span>
+                        )}
+                        <button
+                          onClick={() => handleDeleteTask(t.id)}
+                          className="opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-destructive ml-1"
+                        >
+                          <Trash2 size={13} />
+                        </button>
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+          </Card>
+
+          {/* timeline / audit log */}
+          <Card className="overflow-hidden">
+            <div className="px-5 pt-5 pb-3 border-b border-border flex items-center gap-2">
+              <Clock size={13} className="text-muted-foreground" />
+              <p className="text-sm font-semibold tracking-tight">Histórico</p>
+            </div>
+            <div className="p-5">
+              {loadingAudit ? (
+                <p className="text-sm text-muted-foreground">Carregando...</p>
+              ) : auditEntries.length === 0 ? (
+                <p className="text-sm text-muted-foreground text-center py-3">Nenhuma movimentação registrada.</p>
+              ) : (
+                <div className="relative space-y-0">
+                  {/* vertical line */}
+                  <div className="absolute left-[15px] top-2 bottom-2 w-px bg-border" />
+                  {auditEntries.map((entry) => {
+                    let icon = <Info size={12} />
+                    let label: string = entry.action
+                    if (entry.action === 'lead.status_changed') {
+                      icon = <ArrowRight size={12} />
+                      const from = entry.metadata?.from ? (STATUS_LEAD_LABELS[entry.metadata.from] ?? entry.metadata.from) : '?'
+                      const to = entry.metadata?.to ? (STATUS_LEAD_LABELS[entry.metadata.to] ?? entry.metadata.to) : '?'
+                      label = `Status: ${from} → ${to}`
+                    } else if (entry.action === 'lead.assigned') {
+                      icon = <UserCheck size={12} />
+                      label = `Atribuído a ${entry.metadata?.agent ?? '?'}`
+                    }
+                    return (
+                      <div key={entry.id} className="relative flex items-start gap-3 pl-8 pb-4 last:pb-0">
+                        <div className="absolute left-0 h-[30px] w-[30px] flex items-center justify-center rounded-full bg-subtle border border-border text-muted-foreground shrink-0">
+                          {icon}
+                        </div>
+                        <div className="flex-1 min-w-0 pt-0.5">
+                          <p className="text-sm leading-snug">{label}</p>
+                          <p className="text-[11px] text-muted-foreground mt-0.5">
+                            {entry.actor_email && <span className="mr-1">{entry.actor_email} ·</span>}
+                            {formatDate(entry.created_at)}
+                          </p>
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
             </div>
           </Card>
 

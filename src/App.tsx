@@ -9,6 +9,7 @@ const Leads = lazy(() => import('./pages/Leads').then((m) => ({ default: m.Leads
 const Agendamentos = lazy(() => import('./pages/Agendamentos').then((m) => ({ default: m.Agendamentos })))
 const Imoveis = lazy(() => import('./pages/Imoveis').then((m) => ({ default: m.Imoveis })))
 const BotConfig = lazy(() => import('./pages/BotConfig').then((m) => ({ default: m.BotConfig })))
+const Negocios = lazy(() => import('./pages/Negocios').then((m) => ({ default: m.Negocios })))
 const Settings = lazy(() => import('./pages/Settings').then((m) => ({ default: m.Settings })))
 const Login = lazy(() => import('./pages/Login').then((m) => ({ default: m.Login })))
 const Onboarding = lazy(() => import('./pages/Onboarding').then((m) => ({ default: m.Onboarding })))
@@ -59,6 +60,7 @@ export default function App() {
             <Route path="/" element={<Dashboard />} />
             <Route path="/leads" element={<Leads />} />
             <Route path="/agendamentos" element={<Agendamentos />} />
+            <Route path="/negocios" element={<Negocios />} />
             <Route path="/imoveis" element={<Imoveis />} />
             <Route path="/bot" element={<BotConfig />} />
             <Route path="/settings" element={<Settings />} />

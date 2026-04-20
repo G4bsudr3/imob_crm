@@ -3,11 +3,15 @@ import { supabase } from '../lib/supabase'
 import type { Lead } from '../types/database'
 import { useProfile } from './useProfile'
 
+const PAGE_SIZE = 80
+
 export function useLeads() {
   const { profile } = useProfile()
   const orgId = profile?.organization_id ?? null
   const [leads, setLeads] = useState<Lead[]>([])
   const [loading, setLoading] = useState(true)
+  const [loadingMore, setLoadingMore] = useState(false)
+  const [hasMore, setHasMore] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null)
 
@@ -18,14 +22,32 @@ export function useLeads() {
       return
     }
     setLoading(true)
-    const { data, error } = await supabase
+    const { data, error, count } = await supabase
+      .from('leads')
+      .select('*', { count: 'exact' })
+      .eq('organization_id', orgId)
+      .order('created_at', { ascending: false })
+      .limit(PAGE_SIZE)
+    if (error) setError(error.message)
+    else {
+      setLeads(data ?? [])
+      setHasMore((count ?? 0) > PAGE_SIZE)
+    }
+    setLoading(false)
+  }
+
+  async function loadMore() {
+    if (!orgId || loadingMore) return
+    setLoadingMore(true)
+    const { data } = await supabase
       .from('leads')
       .select('*')
       .eq('organization_id', orgId)
       .order('created_at', { ascending: false })
-    if (error) setError(error.message)
-    else setLeads(data ?? [])
-    setLoading(false)
+      .range(leads.length, leads.length + PAGE_SIZE - 1)
+    setLeads((prev) => [...prev, ...(data ?? [])])
+    setHasMore((data ?? []).length === PAGE_SIZE)
+    setLoadingMore(false)
   }
 
   async function updateLeadStatus(id: string, status: string) {
@@ -89,5 +111,5 @@ export function useLeads() {
     }
   }, [orgId])
 
-  return { leads, loading, error, refetch: fetchLeads, updateLeadStatus, updateLead, deleteLead }
+  return { leads, loading, loadingMore, hasMore, error, refetch: fetchLeads, loadMore, updateLeadStatus, updateLead, deleteLead }
 }

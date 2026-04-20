@@ -48,19 +48,38 @@ export type PropertyInput = {
   internal_notes: string | null
 }
 
+const PAGE_SIZE = 50
+
 export function useProperties() {
   const { profile } = useProfile()
   const [properties, setProperties] = useState<Property[]>([])
   const [loading, setLoading] = useState(true)
+  const [loadingMore, setLoadingMore] = useState(false)
+  const [hasMore, setHasMore] = useState(false)
 
   async function fetchProperties() {
     setLoading(true)
+    const { data, count } = await supabase
+      .from('properties')
+      .select('*', { count: 'exact' })
+      .order('created_at', { ascending: false })
+      .limit(PAGE_SIZE)
+    setProperties(data ?? [])
+    setHasMore((count ?? 0) > PAGE_SIZE)
+    setLoading(false)
+  }
+
+  async function loadMore() {
+    if (loadingMore) return
+    setLoadingMore(true)
     const { data } = await supabase
       .from('properties')
       .select('*')
       .order('created_at', { ascending: false })
-    setProperties(data ?? [])
-    setLoading(false)
+      .range(properties.length, properties.length + PAGE_SIZE - 1)
+    setProperties((prev) => [...prev, ...(data ?? [])])
+    setHasMore((data ?? []).length === PAGE_SIZE)
+    setLoadingMore(false)
   }
 
   async function createProperty(input: PropertyInput): Promise<{ error: any; id?: string }> {
@@ -94,8 +113,9 @@ export function useProperties() {
   useEffect(() => { fetchProperties() }, [profile?.organization_id])
 
   return {
-    properties, loading,
+    properties, loading, loadingMore, hasMore,
     refetch: fetchProperties,
+    loadMore,
     createProperty,
     updateProperty,
     updateStatus,

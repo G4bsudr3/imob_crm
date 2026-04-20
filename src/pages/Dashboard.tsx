@@ -271,6 +271,31 @@ export function Dashboard() {
           )}
         </div>
       </Card>
+
+      {/* Performance por corretor */}
+      {stats && stats.agentPerformance.length > 0 && (
+        <Card>
+          <div className="px-5 py-4 border-b border-border flex items-center gap-2">
+            <Users size={14} className="text-muted-foreground" />
+            <p className="text-sm font-semibold">Performance por corretor</p>
+          </div>
+          <div className="divide-y divide-border">
+            {stats.agentPerformance.map((agent, i) => (
+              <div key={agent.agent_id} className="px-5 py-3 flex items-center gap-3">
+                <span className="text-xs font-mono text-muted-foreground w-4">{i + 1}</span>
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium truncate">{agent.agent_name ?? agent.agent_email}</p>
+                </div>
+                <div className="flex items-center gap-3 text-xs text-muted-foreground shrink-0">
+                  <span>{agent.total} leads</span>
+                  <span className="text-warning">{agent.agendados} visitas</span>
+                  <span className="text-success font-medium">{agent.convertidos} fechados</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
     </div>
   )
 }

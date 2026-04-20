@@ -311,7 +311,7 @@ function LeadImportDialog({ onClose, onImported, orgId }: { onClose: () => void;
 }
 
 export function Leads() {
-  const { leads, loading, updateLeadStatus, deleteLead, refetch } = useLeads()
+  const { leads, loading, loadingMore, hasMore, loadMore, updateLeadStatus, deleteLead, refetch } = useLeads()
   const { profile } = useProfile()
   const confirm = useConfirm()
   const toast = useToast()
@@ -688,6 +688,14 @@ export function Leads() {
             </table>
           </div>
         </Card>
+      )}
+
+      {hasMore && (
+        <div className="flex justify-center pt-4">
+          <Button variant="outline" onClick={loadMore} loading={loadingMore}>
+            Carregar mais leads
+          </Button>
+        </div>
       )}
 
       {/* Legenda só na tabela (no Kanban as colunas já são a legenda) */}

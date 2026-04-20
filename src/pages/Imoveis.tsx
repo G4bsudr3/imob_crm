@@ -297,7 +297,7 @@ function Checkbox({ checked, onChange, label }: { checked: boolean; onChange: (v
 // =========================================================================
 
 export function Imoveis() {
-  const { properties, loading, createProperty, updateProperty, updateStatus, deleteProperty } = useProperties()
+  const { properties, loading, loadingMore, hasMore, loadMore, createProperty, updateProperty, updateStatus, deleteProperty } = useProperties()
   const { profile } = useProfile()
   const confirm = useConfirm()
   const toast = useToast()
@@ -925,6 +925,14 @@ export function Imoveis() {
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               {filtered.map((p) => <PropertyCard key={p.id} p={p} onEdit={startEdit} onStatus={updateStatus} onDelete={handleDelete} />)}
+            </div>
+          )}
+
+          {hasMore && (
+            <div className="flex justify-center pt-4">
+              <Button variant="outline" onClick={loadMore} loading={loadingMore}>
+                Carregar mais imóveis
+              </Button>
             </div>
           )}
         </>

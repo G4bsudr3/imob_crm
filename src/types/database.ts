@@ -497,6 +497,45 @@ export type Database = {
           }
         ]
       }
+      lead_tasks: {
+        Row: {
+          id: string
+          organization_id: string
+          lead_id: string
+          created_by: string | null
+          assigned_to: string | null
+          title: string
+          due_date: string | null
+          completed_at: string | null
+          created_at: string
+          updated_at: string
+        }
+        Insert: {
+          id?: string
+          organization_id: string
+          lead_id: string
+          created_by?: string | null
+          assigned_to?: string | null
+          title: string
+          due_date?: string | null
+          completed_at?: string | null
+          created_at?: string
+          updated_at?: string
+        }
+        Update: {
+          id?: string
+          organization_id?: string
+          lead_id?: string
+          created_by?: string | null
+          assigned_to?: string | null
+          title?: string
+          due_date?: string | null
+          completed_at?: string | null
+          created_at?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
       profiles: {
         Row: {
           created_at: string

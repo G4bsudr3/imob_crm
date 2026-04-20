@@ -1,6 +1,6 @@
 import { NavLink, useNavigate } from 'react-router-dom'
 import { useEffect, useRef, useState } from 'react'
-import { LayoutDashboard, Users, Calendar, Home, MessageSquare, LogOut, Settings as SettingsIcon, X, Search, ChevronUp, UserCog } from 'lucide-react'
+import { LayoutDashboard, Users, Calendar, Home, MessageSquare, LogOut, Settings as SettingsIcon, X, Search, ChevronUp, UserCog, TrendingUp } from 'lucide-react'
 import { cn } from '../../lib/utils'
 import { useAuth } from '../../hooks/useAuth'
 import { useProfile } from '../../hooks/useProfile'
@@ -18,6 +18,7 @@ function isMac(): boolean {
 const mainNav = [
   { to: '/', icon: LayoutDashboard, label: 'Dashboard' },
   { to: '/leads', icon: Users, label: 'Leads' },
+  { to: '/negocios', icon: TrendingUp, label: 'Negócios' },
   { to: '/agendamentos', icon: Calendar, label: 'Agendamentos' },
   { to: '/imoveis', icon: Home, label: 'Imóveis' },
 ]
