@@ -588,11 +588,14 @@ async function executeTool(toolName: string, input: Record<string, unknown>, ctx
       return JSON.stringify({ error: 'conflict', reason: conflictGoogle ? 'Horario ocupado na agenda do corretor.' : 'Imovel ja tem visita proxima.', privacy_note: 'NAO revele detalhes.', suggested_slots: suggested, instructions_for_ai: 'Oferece alternativas, pergunta qual prefere.' })
     }
 
-    const { data: leadRow } = await ctx.admin.from('leads').select('name, phone, email').eq('id', ctx.leadId).maybeSingle()
+    const { data: leadRow } = await ctx.admin.from('leads').select('name, phone, email, profile_notes').eq('id', ctx.leadId).maybeSingle()
     const { data: appt, error } = await ctx.admin.from('appointments').insert({ organization_id: ctx.orgId, lead_id: ctx.leadId, property_id: propertyId, scheduled_at: date.toISOString(), notes, status: 'agendado' }).select('id, scheduled_at').single()
     if (error) return JSON.stringify({ error: error.message })
-    // PAUSE bot: agendamento marca fim do atendimento automatizado; corretor assume.
-    await ctx.admin.from('leads').update({ status: 'agendado', bot_paused: true, bot_paused_at: new Date().toISOString(), bot_paused_reason: 'visita_agendada' }).eq('id', ctx.leadId)
+    // PAUSE bot + write handoff note so corretor opens the lead with full context.
+    const handoffStamp = new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })
+    const handoffNote = `[${handoffStamp}] 🤖 Bot agendou visita: ${prop.title} em ${fmtBrtShort(date)}${notes ? ` — Obs: ${notes}` : ''}`
+    const updatedNotes = leadRow?.profile_notes ? `${leadRow.profile_notes}\n${handoffNote}` : handoffNote
+    await ctx.admin.from('leads').update({ status: 'agendado', bot_paused: true, bot_paused_at: new Date().toISOString(), bot_paused_reason: 'visita_agendada', profile_notes: updatedNotes }).eq('id', ctx.leadId)
 
     let googleEventId: string | null = null
     let inviteSentToEmail: string | null = null

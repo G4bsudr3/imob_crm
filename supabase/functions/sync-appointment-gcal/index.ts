@@ -163,6 +163,7 @@ Deno.serve(async (req) => {
   try { body = await req.json() } catch { return json({ error: 'Invalid JSON' }, 400) }
 
   const { appointment_id, action = 'create' } = body
+
   if (!appointment_id) return json({ error: 'appointment_id required' }, 400)
 
   const admin = createClient(supabaseUrl, serviceKey)
@@ -177,17 +178,53 @@ Deno.serve(async (req) => {
   if (!prof?.organization_id) return json({ error: 'No organization' }, 400)
   const orgId = prof.organization_id
 
-  // Fetch the appointment (validate it belongs to this org)
+  // Fetch the appointment with all fields needed for any action
   const { data: appt, error: apptErr } = await admin
     .from('appointments')
-    .select('id, scheduled_at, notes, lead_id, property_id, google_event_id, google_calendar_user_id, leads(name, email), properties(title, location)')
+    .select('id, scheduled_at, notes, lead_id, property_id, google_event_id, google_calendar_user_id, leads(name, phone, email), properties(title, location)')
     .eq('id', appointment_id)
     .eq('organization_id', orgId)
     .maybeSingle()
 
   if (apptErr || !appt) return json({ error: 'Appointment not found' }, 404)
 
-  // Get org's Google Calendar integration
+  // ── CONFIRM WHATSAPP ─────────────────────────────────────────────────────────
+  // Handled before GCal checks — doesn't require calendar integration
+  if (action === 'confirm_whatsapp') {
+    const lead = appt.leads as { name: string | null; phone: string; email: string | null } | null
+    const prop = appt.properties as { title: string; location: string } | null
+    if (!lead?.phone) return json({ skipped: 'no_phone' })
+
+    const { data: instance } = await admin
+      .from('whatsapp_instances')
+      .select('instance_name')
+      .eq('organization_id', orgId)
+      .maybeSingle()
+
+    if (!instance?.instance_name) return json({ skipped: 'no_whatsapp_instance' })
+
+    const evoUrl = Deno.env.get('EVOLUTION_API_URL')
+    const evoKey = Deno.env.get('EVOLUTION_API_KEY')
+    if (!evoUrl || !evoKey) return json({ skipped: 'no_evolution_config' })
+
+    const dateStr = new Date(appt.scheduled_at).toLocaleString('pt-BR', {
+      timeZone: 'America/Sao_Paulo', dateStyle: 'full', timeStyle: 'short',
+    })
+    const firstName = lead.name ? ` ${lead.name.split(' ')[0]}` : ''
+    let message = `📅 Olá${firstName}! Sua visita está confirmada para *${dateStr}*.`
+    if (prop) message += `\n🏠 Imóvel: ${prop.title} — ${prop.location}`
+    message += `\n\nQualquer dúvida, é só chamar! 😊`
+
+    await fetch(`${evoUrl}/message/sendText/${instance.instance_name}`, {
+      method: 'POST',
+      headers: { apikey: evoKey, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ number: lead.phone, text: message, delay: 1200 }),
+    }).catch(() => {})
+
+    return json({ ok: true })
+  }
+
+  // Get org's Google Calendar integration (required for all remaining actions)
   const integ = await getOrgCalIntegration(admin, orgId)
   if (!integ) return json({ skipped: 'no_calendar_integration' })
 
@@ -215,8 +252,8 @@ Deno.serve(async (req) => {
   // Already synced — idempotent guard
   if (appt.google_event_id) return json({ skipped: 'already_synced', google_event_id: appt.google_event_id })
 
-  const leadName = (appt.leads as { name: string | null; email: string | null } | null)?.name ?? 'Lead'
-  const leadEmail = (appt.leads as { name: string | null; email: string | null } | null)?.email ?? null
+  const leadName = (appt.leads as { name: string | null; phone: string; email: string | null } | null)?.name ?? 'Lead'
+  const leadEmail = (appt.leads as { name: string | null; phone: string; email: string | null } | null)?.email ?? null
   const propertyTitle = (appt.properties as { title: string; location: string } | null)?.title
   const propertyLocation = (appt.properties as { title: string; location: string } | null)?.location
 

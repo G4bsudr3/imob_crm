@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { X, Save, MessageSquare, User, Calendar, Phone, Bot, BotOff, MapPin, Trophy, Send, ChevronUp, Home, CheckSquare, Clock, ArrowRight, UserCheck, Info, Trash2 } from 'lucide-react'
+import { X, Save, MessageSquare, User, Calendar, Phone, Bot, BotOff, MapPin, Trophy, Send, ChevronUp, Home, CheckSquare, Clock, ArrowRight, UserCheck, Info, Trash2, AlertTriangle, UserCog } from 'lucide-react'
 import { supabase } from '../lib/supabase'
 import type { Lead, Conversation } from '../types/database'
 import { formatDate, formatTime, cn, STATUS_APPT_LABELS, STATUS_APPT_VARIANTS, formatCurrency, STATUS_LEAD_LABELS } from '../lib/utils'
@@ -72,10 +72,12 @@ export function LeadDetail({ lead, onClose, onSaved }: Props) {
   const [auditEntries, setAuditEntries] = useState<AuditEntry[]>([])
   const [loadingAudit, setLoadingAudit] = useState(true)
 
+  const [orgProfiles, setOrgProfiles] = useState<Array<{id: string; name: string | null; email: string | null}>>([])
   const [form, setForm] = useState({
     name: lead.name ?? '',
     phone: lead.phone ?? '',
     email: lead.email ?? '',
+    assigned_to: lead.assigned_to ?? '',
     location_interest: lead.location_interest ?? '',
     property_type: lead.property_type ?? '',
     bedrooms_needed: lead.bedrooms_needed?.toString() ?? '',
@@ -112,6 +114,16 @@ export function LeadDetail({ lead, onClose, onSaved }: Props) {
   // Sem isso, se `lead.bot_paused` muda fora do Detail (ex: bot pausou automaticamente ao agendar),
   // o card ficaria com valor antigo.
   useEffect(() => { setBotPaused(lead.bot_paused ?? false) }, [lead.bot_paused])
+
+  useEffect(() => {
+    if (!lead.organization_id) return
+    supabase
+      .from('profiles')
+      .select('id, name, email')
+      .eq('organization_id', lead.organization_id)
+      .order('name')
+      .then(({ data }) => setOrgProfiles(data ?? []))
+  }, [lead.organization_id])
   const pauseReasonLabel = lead.bot_paused_reason
     ? PAUSE_REASON_LABEL[lead.bot_paused_reason] ?? lead.bot_paused_reason
     : null
@@ -197,6 +209,7 @@ export function LeadDetail({ lead, onClose, onSaved }: Props) {
       name: form.name || null,
       phone: form.phone,
       email: form.email.trim() || null,
+      assigned_to: form.assigned_to || null,
       location_interest: form.location_interest || null,
       property_type: form.property_type || null,
       bedrooms_needed: form.bedrooms_needed ? parseInt(form.bedrooms_needed) : null,
@@ -359,7 +372,14 @@ export function LeadDetail({ lead, onClose, onSaved }: Props) {
               {initials}
             </div>
             <div className="min-w-0">
-              <p className="text-sm font-semibold truncate">{form.name || 'Sem nome'}</p>
+              <div className="flex items-center gap-1.5">
+                <p className="text-sm font-semibold truncate">{form.name || 'Sem nome'}</p>
+                {!lead.name_confirmed && (
+                  <span title="Nome não confirmado pelo lead" className="text-warning shrink-0">
+                    <AlertTriangle size={11} />
+                  </span>
+                )}
+              </div>
               <p className="text-[11px] text-muted-foreground flex items-center gap-1 truncate">
                 <Phone size={10} /> {form.phone}
               </p>
@@ -607,6 +627,23 @@ export function LeadDetail({ lead, onClose, onSaved }: Props) {
                 <Field label="Orçamento máx. (R$)">
                   <Input type="number" value={form.budget_max} onChange={(e) => setForm((f) => ({ ...f, budget_max: e.target.value }))} />
                 </Field>
+                {orgProfiles.length > 0 && (
+                  <Field label="Responsável" className="col-span-2">
+                    <div className="relative">
+                      <UserCog size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
+                      <select
+                        value={form.assigned_to}
+                        onChange={(e) => setForm((f) => ({ ...f, assigned_to: e.target.value }))}
+                        className="w-full rounded-md border border-border bg-background pl-8 pr-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
+                      >
+                        <option value="">Sem responsável</option>
+                        {orgProfiles.map((p) => (
+                          <option key={p.id} value={p.id}>{p.name ?? p.email ?? p.id.slice(0, 8)}</option>
+                        ))}
+                      </select>
+                    </div>
+                  </Field>
+                )}
                 <Field label="Notas" className="col-span-2">
                   <Textarea rows={2} value={form.profile_notes} onChange={(e) => setForm((f) => ({ ...f, profile_notes: e.target.value }))} />
                 </Field>
@@ -787,12 +824,22 @@ export function LeadDetail({ lead, onClose, onSaved }: Props) {
                       )}
                     >
                       <p className="whitespace-pre-wrap leading-relaxed">{c.message}</p>
-                      <p className={cn(
-                        'text-[10px] mt-1 tabular',
-                        c.direction === 'in' ? 'text-muted-foreground' : 'text-primary-foreground/70',
+                      <div className={cn(
+                        'flex items-center gap-1.5 mt-1',
+                        c.direction === 'in' ? 'justify-start' : 'justify-end',
                       )}>
-                        {formatTime(c.sent_at)}
-                      </p>
+                        <p className={cn(
+                          'text-[10px] tabular',
+                          c.direction === 'in' ? 'text-muted-foreground' : 'text-primary-foreground/70',
+                        )}>
+                          {formatTime(c.sent_at)}
+                        </p>
+                        {c.ai_tool_used && (
+                          <span className="text-[9px] px-1 py-0.5 rounded bg-black/10 text-primary-foreground/60 font-mono truncate max-w-[100px]" title={c.ai_tool_used}>
+                            {c.ai_tool_used.replace(/_/g, ' ')}
+                          </span>
+                        )}
+                      </div>
                     </div>
                   ))}
                 </div>

@@ -88,11 +88,15 @@ export function useAppointments() {
       .single()
     if (!error) {
       fetchAppointments()
-      // Fire-and-forget Google Calendar sync
       if (inserted?.id) {
+        // Fire-and-forget Google Calendar sync
         supabase.functions
           .invoke('sync-appointment-gcal', { body: { appointment_id: inserted.id } })
-          .catch(() => { /* non-critical */ })
+          .catch(() => {})
+        // Fire-and-forget WhatsApp confirmation to lead
+        supabase.functions
+          .invoke('sync-appointment-gcal', { body: { appointment_id: inserted.id, action: 'confirm_whatsapp' } })
+          .catch(() => {})
       }
     }
     return error
