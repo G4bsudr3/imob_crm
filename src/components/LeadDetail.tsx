@@ -99,7 +99,7 @@ export function LeadDetail({ lead, onClose, onSaved }: Props) {
   const [dealForm, setDealForm] = useState({
     deal_type: lead.deal_type ?? '',
     deal_value: lead.deal_value?.toString() ?? '',
-    deal_closed_at: lead.deal_closed_at ?? new Date().toISOString().slice(0, 10),
+    deal_closed_at: lead.deal_closed_at ?? '',
     deal_property_id: lead.deal_property_id ?? '',
   })
   const [properties, setProperties] = useState<Array<{ id: string; title: string }>>([])

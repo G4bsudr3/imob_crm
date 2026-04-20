@@ -43,10 +43,16 @@ export function Agendamentos() {
   useEffect(() => {
     if (!showForm) return
     supabase.from('leads').select('*').order('created_at', { ascending: false })
-      .then(({ data }) => setLeads(data ?? []))
+      .then(({ data, error }) => {
+        if (error) toast.error('Erro ao carregar leads', error.message)
+        else setLeads(data ?? [])
+      })
     supabase.from('properties').select('*').eq('available', true).order('created_at', { ascending: false })
-      .then(({ data }) => setProperties(data ?? []))
-  }, [showForm])
+      .then(({ data, error }) => {
+        if (error) toast.error('Erro ao carregar imóveis', error.message)
+        else setProperties(data ?? [])
+      })
+  }, [showForm, toast])
 
   // Fetch org members for agent filter (admin/manager only)
   useEffect(() => {

@@ -83,6 +83,10 @@ export function LeadCreateDialog({ onClose, onCreated }: Props) {
       toast.error('Sem organização', 'Recarregue a página e tente novamente')
       return
     }
+    if (phoneExists) {
+      toast.error('Telefone duplicado', `Lead "${phoneExists.name ?? 'sem nome'}" já usa esse número`)
+      return
+    }
     setSaving(true)
     const { error } = await supabase.from('leads').insert({
       organization_id: profile.organization_id,

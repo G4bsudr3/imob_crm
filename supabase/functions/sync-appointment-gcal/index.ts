@@ -1,5 +1,5 @@
-// sync-appointment-gcal: creates a Google Calendar event for a manually-created appointment.
-// Called by the frontend after inserting an appointment via the UI.
+// sync-appointment-gcal: creates/patches/deletes a Google Calendar event for an appointment.
+// Called by the frontend after insert (create), status=cancelado (delete), or reschedule (patch).
 // verify_jwt: false — auth handled manually via getUser() (same pattern as outbound-reengagement).
 
 import { createClient } from 'jsr:@supabase/supabase-js@2'
@@ -15,6 +15,11 @@ function json(body: unknown, status = 200) {
     status,
     headers: { 'Content-Type': 'application/json', ...corsHeaders },
   })
+}
+
+function isValidEmail(s: string | null | undefined): boolean {
+  if (!s) return false
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s.trim())
 }
 
 type CalIntegration = {
@@ -72,13 +77,14 @@ async function refreshGoogleToken(admin: any, integ: CalIntegration): Promise<st
   return j.access_token
 }
 
-async function createGoogleEvent(
+async function gcalCreate(
   accessToken: string,
   calendarId: string,
-  input: { summary: string; description?: string; startAt: Date; location?: string | null },
+  input: { summary: string; description?: string; startAt: Date; location?: string | null; attendeeEmail?: string | null },
 ): Promise<{ id: string } | null> {
   const end = new Date(input.startAt.getTime() + 60 * 60_000)
-  const body = {
+  const hasAttendee = isValidEmail(input.attendeeEmail)
+  const body: Record<string, unknown> = {
     summary: input.summary,
     description: input.description ?? null,
     location: input.location ?? null,
@@ -86,16 +92,54 @@ async function createGoogleEvent(
     end: { dateTime: end.toISOString(), timeZone: 'America/Sao_Paulo' },
     reminders: { useDefault: true },
   }
-  const res = await fetch(
+  if (hasAttendee) {
+    body.attendees = [{ email: input.attendeeEmail!.trim() }]
+  }
+  const url = new URL(
     `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events`,
+  )
+  if (hasAttendee) url.searchParams.set('sendUpdates', 'all')
+  const res = await fetch(url.toString(), {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) return null
+  return await res.json() as { id: string }
+}
+
+async function gcalDelete(
+  accessToken: string,
+  calendarId: string,
+  eventId: string,
+): Promise<boolean> {
+  const res = await fetch(
+    `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(eventId)}?sendUpdates=all`,
+    { method: 'DELETE', headers: { Authorization: `Bearer ${accessToken}` } },
+  )
+  return res.ok || res.status === 410 // 410 = already deleted
+}
+
+async function gcalPatch(
+  accessToken: string,
+  calendarId: string,
+  eventId: string,
+  startAt: Date,
+): Promise<boolean> {
+  const end = new Date(startAt.getTime() + 60 * 60_000)
+  const body = {
+    start: { dateTime: startAt.toISOString(), timeZone: 'America/Sao_Paulo' },
+    end: { dateTime: end.toISOString(), timeZone: 'America/Sao_Paulo' },
+  }
+  const res = await fetch(
+    `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(eventId)}?sendUpdates=all`,
     {
-      method: 'POST',
+      method: 'PATCH',
       headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     },
   )
-  if (!res.ok) return null
-  return await res.json() as { id: string }
+  return res.ok
 }
 
 Deno.serve(async (req) => {
@@ -115,10 +159,10 @@ Deno.serve(async (req) => {
   const { data: { user } } = await userClient.auth.getUser()
   if (!user) return json({ error: 'Unauthorized' }, 401)
 
-  let body: { appointment_id?: string }
+  let body: { appointment_id?: string; action?: string }
   try { body = await req.json() } catch { return json({ error: 'Invalid JSON' }, 400) }
 
-  const { appointment_id } = body
+  const { appointment_id, action = 'create' } = body
   if (!appointment_id) return json({ error: 'appointment_id required' }, 400)
 
   const admin = createClient(supabaseUrl, serviceKey)
@@ -136,15 +180,12 @@ Deno.serve(async (req) => {
   // Fetch the appointment (validate it belongs to this org)
   const { data: appt, error: apptErr } = await admin
     .from('appointments')
-    .select('id, scheduled_at, notes, lead_id, property_id, google_event_id, leads(name, email), properties(title, location)')
+    .select('id, scheduled_at, notes, lead_id, property_id, google_event_id, google_calendar_user_id, leads(name, email), properties(title, location)')
     .eq('id', appointment_id)
     .eq('organization_id', orgId)
     .maybeSingle()
 
   if (apptErr || !appt) return json({ error: 'Appointment not found' }, 404)
-
-  // Already synced
-  if (appt.google_event_id) return json({ skipped: 'already_synced', google_event_id: appt.google_event_id })
 
   // Get org's Google Calendar integration
   const integ = await getOrgCalIntegration(admin, orgId)
@@ -153,8 +194,29 @@ Deno.serve(async (req) => {
   const accessToken = await refreshGoogleToken(admin, integ)
   if (!accessToken) return json({ error: 'Failed to refresh Google token' }, 500)
 
-  // Build event details
+  // ── DELETE ───────────────────────────────────────────────────────────────────
+  if (action === 'delete') {
+    if (!appt.google_event_id) return json({ skipped: 'no_event_id' })
+    const ok = await gcalDelete(accessToken, integ.calendar_id, appt.google_event_id)
+    if (ok) {
+      await admin.from('appointments').update({ google_event_id: null, google_calendar_user_id: null }).eq('id', appointment_id)
+    }
+    return json({ ok })
+  }
+
+  // ── PATCH (reschedule) ───────────────────────────────────────────────────────
+  if (action === 'patch') {
+    if (!appt.google_event_id) return json({ skipped: 'no_event_id' })
+    const ok = await gcalPatch(accessToken, integ.calendar_id, appt.google_event_id, new Date(appt.scheduled_at))
+    return json({ ok })
+  }
+
+  // ── CREATE ───────────────────────────────────────────────────────────────────
+  // Already synced — idempotent guard
+  if (appt.google_event_id) return json({ skipped: 'already_synced', google_event_id: appt.google_event_id })
+
   const leadName = (appt.leads as { name: string | null; email: string | null } | null)?.name ?? 'Lead'
+  const leadEmail = (appt.leads as { name: string | null; email: string | null } | null)?.email ?? null
   const propertyTitle = (appt.properties as { title: string; location: string } | null)?.title
   const propertyLocation = (appt.properties as { title: string; location: string } | null)?.location
 
@@ -166,20 +228,20 @@ Deno.serve(async (req) => {
   if (propertyLocation) descParts.push(`Local: ${propertyLocation}`)
   if (appt.notes) descParts.push(`Obs: ${appt.notes}`)
 
-  const ev = await createGoogleEvent(accessToken, integ.calendar_id, {
+  const ev = await gcalCreate(accessToken, integ.calendar_id, {
     summary,
     description: descParts.join('\n') || undefined,
     startAt: new Date(appt.scheduled_at),
     location: propertyLocation ?? null,
+    attendeeEmail: leadEmail,
   })
 
   if (!ev) return json({ error: 'Failed to create Google Calendar event' }, 500)
 
-  // Persist the event ID back to the appointment
   await admin
     .from('appointments')
     .update({ google_event_id: ev.id, google_calendar_user_id: integ.user_id })
     .eq('id', appointment_id)
 
-  return json({ ok: true, google_event_id: ev.id })
+  return json({ ok: true, google_event_id: ev.id, invite_sent_to: isValidEmail(leadEmail) ? leadEmail : null })
 })
