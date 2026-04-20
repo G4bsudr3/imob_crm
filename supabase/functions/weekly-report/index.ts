@@ -82,7 +82,8 @@ Deno.serve(async (req) => {
     const { data: pipeline } = await admin.from('leads')
       .select('status')
       .eq('organization_id', orgId)
-      .not('status', 'in', '("descartado","convertido")')
+      .neq('status', 'descartado')
+      .neq('status', 'convertido')
 
     const pipelineByStatus: Record<string, number> = {}
     for (const l of pipeline ?? []) {

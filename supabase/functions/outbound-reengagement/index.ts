@@ -126,7 +126,8 @@ Deno.serve(async (req) => {
       .from('leads')
       .select('id, name, phone, property_type, location_interest, budget_max, bedrooms_needed, bot_paused, status')
       .eq('organization_id', organization_id)
-      .not('status', 'in', '("descartado","convertido")')
+      .neq('status', 'descartado')
+      .neq('status', 'convertido')
       .eq('bot_paused', false)
       .or(
         [
