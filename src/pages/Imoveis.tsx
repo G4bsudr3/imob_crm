@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import {
   Plus, Trash2, Home, MapPin, BedDouble, Bath, Ruler, Pencil, X, Car, Layers,
-  Calendar as CalendarIcon, Sparkles, Search, ExternalLink, ImagePlus, Star, Users,
+  Calendar as CalendarIcon, Sparkles, Search, ExternalLink, ImagePlus, Star, Users, ChevronLeft, ChevronRight, ZoomIn,
 } from 'lucide-react'
 import { useProperties, type PropertyInput } from '../hooks/useProperties'
 import { useProfile } from '../hooks/useProfile'
@@ -312,6 +312,7 @@ export function Imoveis() {
   const [photos, setPhotos] = useState<PhotoRow[]>([])
   const [uploadingPhotos, setUploadingPhotos] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const [lightboxIndex, setLightboxIndex] = useState<number | null>(null)
 
   const [compatLeads, setCompatLeads] = useState<CompatLead[]>([])
   const [loadingCompatLeads, setLoadingCompatLeads] = useState(true)
@@ -520,6 +521,7 @@ export function Imoveis() {
   })
 
   return (
+    <>
     <div className="space-y-6">
       <PageHeader
         title="Imóveis"
@@ -749,24 +751,30 @@ export function Imoveis() {
             ) : (
               <div className="space-y-4">
                 {photos.length > 0 && (
-                  <div className="flex flex-wrap gap-3">
-                    {photos.map((photo) => (
-                      <div key={photo.id} className="relative group w-20 h-20 rounded-lg overflow-hidden border border-border shrink-0">
+                  <div className="grid grid-cols-3 gap-2">
+                    {photos.map((photo, idx) => (
+                      <div key={photo.id} className="relative group aspect-square rounded-lg overflow-hidden border border-border">
                         <img
                           src={photo.url}
                           alt=""
                           className="w-full h-full object-cover"
                         />
-                        <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-1">
+                        <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => setLightboxIndex(idx)}
+                            title="Ver em tamanho real"
+                            className="p-1.5 rounded bg-white/10 hover:bg-white/20 text-white transition-colors"
+                          >
+                            <ZoomIn size={14} />
+                          </button>
                           <button
                             type="button"
                             onClick={() => handleSetCover(photo.id)}
                             title="Definir como capa"
                             className={cn(
-                              'p-1 rounded transition-colors',
-                              photo.is_cover
-                                ? 'text-yellow-400'
-                                : 'text-white hover:text-yellow-400',
+                              'p-1.5 rounded transition-colors',
+                              photo.is_cover ? 'text-yellow-400 bg-white/10' : 'text-white hover:text-yellow-400 bg-white/10 hover:bg-white/20',
                             )}
                           >
                             <Star size={14} fill={photo.is_cover ? 'currentColor' : 'none'} />
@@ -775,7 +783,7 @@ export function Imoveis() {
                             type="button"
                             onClick={() => handleDeletePhoto(photo)}
                             title="Remover foto"
-                            className="p-1 rounded text-white hover:text-red-400 transition-colors"
+                            className="p-1.5 rounded bg-white/10 hover:bg-red-500/70 text-white transition-colors"
                           >
                             <Trash2 size={14} />
                           </button>
@@ -922,6 +930,46 @@ export function Imoveis() {
         </>
       )}
     </div>
+
+    {/* Lightbox */}
+    {lightboxIndex !== null && photos.length > 0 && (
+      <div
+        className="fixed inset-0 z-[60] bg-black/90 flex items-center justify-center animate-fade-in"
+        onClick={() => setLightboxIndex(null)}
+      >
+        <button
+          className="absolute top-4 right-4 p-2 rounded-full bg-white/10 hover:bg-white/20 text-white transition-colors"
+          onClick={() => setLightboxIndex(null)}
+        >
+          <X size={18} />
+        </button>
+        {photos.length > 1 && (
+          <>
+            <button
+              className="absolute left-4 top-1/2 -translate-y-1/2 p-2 rounded-full bg-white/10 hover:bg-white/20 text-white transition-colors"
+              onClick={(e) => { e.stopPropagation(); setLightboxIndex((i) => ((i ?? 0) - 1 + photos.length) % photos.length) }}
+            >
+              <ChevronLeft size={22} />
+            </button>
+            <button
+              className="absolute right-4 top-1/2 -translate-y-1/2 p-2 rounded-full bg-white/10 hover:bg-white/20 text-white transition-colors"
+              onClick={(e) => { e.stopPropagation(); setLightboxIndex((i) => ((i ?? 0) + 1) % photos.length) }}
+            >
+              <ChevronRight size={22} />
+            </button>
+          </>
+        )}
+        <div className="flex flex-col items-center gap-3 max-w-3xl max-h-[90vh] px-16" onClick={(e) => e.stopPropagation()}>
+          <img
+            src={photos[lightboxIndex].url}
+            alt=""
+            className="max-w-full max-h-[80vh] rounded-lg object-contain shadow-2xl"
+          />
+          <p className="text-white/60 text-xs">{lightboxIndex + 1} / {photos.length}{photos[lightboxIndex].is_cover ? ' · Capa' : ''}</p>
+        </div>
+      </div>
+    )}
+    </>
   )
 }
 
