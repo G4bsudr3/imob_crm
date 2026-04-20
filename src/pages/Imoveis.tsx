@@ -306,6 +306,8 @@ export function Imoveis() {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [cepLoading, setCepLoading] = useState(false)
+  const [cepError, setCepError] = useState(false)
+  const addressNumberRef = useRef<HTMLInputElement>(null)
   const [search, setSearch] = useState('')
   const [filterStatus, setFilterStatus] = useState('')
 
@@ -339,6 +341,7 @@ export function Imoveis() {
     setForm(emptyForm)
     setPhotos([])
     setError(null)
+    setCepError(false)
     setMode('create')
   }
 
@@ -346,6 +349,7 @@ export function Imoveis() {
     setForm(propertyToForm(p))
     setPhotos([])
     setError(null)
+    setCepError(false)
     setMode({ edit: p.id })
   }
 
@@ -353,15 +357,17 @@ export function Imoveis() {
     setForm(emptyForm)
     setPhotos([])
     setError(null)
+    setCepError(false)
     setMode('idle')
   }
 
   async function handleCepLookup(cep: string) {
     if (cep.replace(/\D/g, '').length !== 8) return
     setCepLoading(true)
+    setCepError(false)
     const result = await fetchCep(cep)
     setCepLoading(false)
-    if (!result) return
+    if (!result) { setCepError(true); return }
     setForm((f) => ({
       ...f,
       location: result.street || f.location,
@@ -369,6 +375,7 @@ export function Imoveis() {
       city: result.city || f.city,
       address_state: result.state || f.address_state,
     }))
+    setTimeout(() => addressNumberRef.current?.focus(), 50)
   }
 
   function toggleAmenity(key: string) {
@@ -639,17 +646,19 @@ export function Imoveis() {
                   onChange={(e) => {
                     const v = maskCEP(e.target.value)
                     setForm((f) => ({ ...f, address_zip: v }))
+                    setCepError(false)
                     if (v.replace(/\D/g, '').length === 8) handleCepLookup(v)
                   }}
                   placeholder="00000-000"
                 />
                 {cepLoading && <p className="text-[11px] text-muted-foreground mt-1">Buscando CEP...</p>}
+                {cepError && <p className="text-[11px] text-destructive mt-1">CEP não encontrado</p>}
               </Field>
               <Field label="Rua / logradouro *" className="sm:col-span-4">
                 <Input value={form.location} onChange={(e) => setForm((f) => ({ ...f, location: e.target.value }))} placeholder="Av. Paulista" />
               </Field>
               <Field label="Número" className="sm:col-span-2">
-                <Input value={form.address_number} onChange={(e) => setForm((f) => ({ ...f, address_number: e.target.value }))} placeholder="1000" />
+                <Input ref={addressNumberRef} value={form.address_number} onChange={(e) => setForm((f) => ({ ...f, address_number: e.target.value }))} placeholder="1000" />
               </Field>
               <Field label="Complemento" className="sm:col-span-4">
                 <Input value={form.address_complement} onChange={(e) => setForm((f) => ({ ...f, address_complement: e.target.value }))} placeholder="Apto 501, Bloco B" />
