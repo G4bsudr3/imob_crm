@@ -1,6 +1,6 @@
 // sync-appointment-gcal: creates a Google Calendar event for a manually-created appointment.
 // Called by the frontend after inserting an appointment via the UI.
-// Reuses the same GCal helpers as bot-webhook.
+// verify_jwt: false — auth handled manually via getUser() (same pattern as outbound-reengagement).
 
 import { createClient } from 'jsr:@supabase/supabase-js@2'
 
