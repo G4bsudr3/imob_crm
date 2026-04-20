@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react'
-import { Calendar, MapPin, User, Plus, FileText } from 'lucide-react'
+import { Calendar, LayoutList, MapPin, User, Plus, FileText, CalendarDays } from 'lucide-react'
 import { useAppointments } from '../hooks/useAppointments'
+import { useProfile } from '../hooks/useProfile'
 import { supabase } from '../lib/supabase'
 import type { Lead, Property } from '../types/database'
-import { STATUS_APPT_LABELS, STATUS_APPT_VARIANTS, formatDate } from '../lib/utils'
+import { STATUS_APPT_LABELS, STATUS_APPT_VARIANTS, formatDate, cn } from '../lib/utils'
 import { Badge } from '../components/ui/Badge'
 import { Button } from '../components/ui/Button'
 import { Card } from '../components/ui/Card'
@@ -12,19 +13,33 @@ import { PageHeader } from '../components/ui/PageHeader'
 import { EmptyState } from '../components/ui/EmptyState'
 import { SkeletonCard } from '../components/ui/Skeleton'
 import { useToast } from '../components/ui/Toast'
+import { CalendarView } from '../components/CalendarView'
 
 const STATUS_OPTIONS = ['agendado', 'confirmado', 'cancelado', 'realizado']
 const emptyForm = { lead_id: '', property_id: '', scheduled_at: '', notes: '' }
 
+type ViewMode = 'list' | 'month' | 'week'
+
+type OrgProfile = { id: string; name: string | null; email: string | null }
+
 export function Agendamentos() {
   const { appointments, loading, updateStatus, createAppointment } = useAppointments()
+  const { profile } = useProfile()
   const toast = useToast()
+
+  const [view, setView] = useState<ViewMode>('list')
   const [showForm, setShowForm] = useState(false)
   const [form, setForm] = useState(emptyForm)
   const [saving, setSaving] = useState(false)
   const [leads, setLeads] = useState<Lead[]>([])
   const [properties, setProperties] = useState<Property[]>([])
+  const [orgProfiles, setOrgProfiles] = useState<OrgProfile[]>([])
+  const [agentFilter, setAgentFilter] = useState<string>('all')
 
+  const isAdmin = profile?.role === 'admin' || profile?.role === 'manager'
+  const isCorretor = profile?.role === 'corretor'
+
+  // Fetch leads and properties when form is open
   useEffect(() => {
     if (!showForm) return
     supabase.from('leads').select('*').order('created_at', { ascending: false })
@@ -33,8 +48,35 @@ export function Agendamentos() {
       .then(({ data }) => setProperties(data ?? []))
   }, [showForm])
 
-  const upcoming = appointments.filter((a) => a.status !== 'cancelado' && a.status !== 'realizado')
-  const past = appointments.filter((a) => a.status === 'cancelado' || a.status === 'realizado')
+  // Fetch org members for agent filter (admin/manager only)
+  useEffect(() => {
+    if (!isAdmin || !profile?.organization_id) return
+    supabase
+      .from('profiles')
+      .select('id, name, email')
+      .eq('organization_id', profile.organization_id)
+      .order('name')
+      .then(({ data }) => setOrgProfiles((data as OrgProfile[]) ?? []))
+  }, [isAdmin, profile?.organization_id])
+
+  // Filter appointments
+  const filteredAppointments = appointments.filter((a) => {
+    // Corretores only see their own
+    if (isCorretor && a.leads?.assigned_to !== profile?.id) return false
+    // Admin: agent filter
+    if (isAdmin && agentFilter !== 'all' && a.leads?.assigned_to !== agentFilter) return false
+    return true
+  })
+
+  const upcoming = filteredAppointments.filter((a) => a.status !== 'cancelado' && a.status !== 'realizado')
+  const past = filteredAppointments.filter((a) => a.status === 'cancelado' || a.status === 'realizado')
+
+  function openFormForDate(dateTimeStr: string) {
+    setForm((f) => ({ ...f, scheduled_at: dateTimeStr }))
+    setShowForm(true)
+    // Scroll to form
+    setTimeout(() => window.scrollTo({ top: 0, behavior: 'smooth' }), 50)
+  }
 
   async function handleSave() {
     if (!form.lead_id || !form.scheduled_at) return
@@ -60,6 +102,12 @@ export function Agendamentos() {
     if (error) toast.error('Erro ao atualizar status', error.message)
     else toast.success(`Status: ${STATUS_APPT_LABELS[status]}`)
   }
+
+  const viewButtons: { mode: ViewMode; icon: React.ReactNode; label: string }[] = [
+    { mode: 'list', icon: <LayoutList size={14} />, label: 'Lista' },
+    { mode: 'month', icon: <Calendar size={14} />, label: 'Mês' },
+    { mode: 'week', icon: <CalendarDays size={14} />, label: 'Semana' },
+  ]
 
   function AppointmentCard({ appt }: { appt: typeof appointments[0] }) {
     return (
@@ -99,12 +147,7 @@ export function Agendamentos() {
 
         <div className="mt-3 pt-3 border-t border-border flex flex-wrap gap-1.5">
           {STATUS_OPTIONS.filter((s) => s !== appt.status).map((s) => (
-            <Button
-              key={s}
-              variant="outline"
-              size="sm"
-              onClick={() => handleStatus(appt.id, s)}
-            >
+            <Button key={s} variant="outline" size="sm" onClick={() => handleStatus(appt.id, s)}>
               {STATUS_APPT_LABELS[s]}
             </Button>
           ))}
@@ -119,12 +162,68 @@ export function Agendamentos() {
         title="Agendamentos"
         description={`${upcoming.length} visita${upcoming.length !== 1 ? 's' : ''} ativa${upcoming.length !== 1 ? 's' : ''}`}
         actions={
-          <Button leftIcon={<Plus size={14} />} onClick={() => setShowForm(!showForm)}>
-            Novo agendamento
-          </Button>
+          <div className="flex items-center gap-2">
+            {/* View toggle */}
+            <div className="flex items-center gap-0.5 border border-border rounded-lg p-0.5 bg-subtle">
+              {viewButtons.map(({ mode, icon, label }) => (
+                <button
+                  key={mode}
+                  onClick={() => setView(mode)}
+                  className={cn(
+                    'flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium transition-colors',
+                    view === mode
+                      ? 'bg-background text-foreground shadow-sm'
+                      : 'text-muted-foreground hover:text-foreground',
+                  )}
+                >
+                  {icon}
+                  <span className="hidden sm:inline">{label}</span>
+                </button>
+              ))}
+            </div>
+
+            <Button leftIcon={<Plus size={14} />} onClick={() => setShowForm(!showForm)}>
+              Novo agendamento
+            </Button>
+          </div>
         }
       />
 
+      {/* Agent filter (admin/manager only) */}
+      {isAdmin && orgProfiles.length > 1 && (
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-muted-foreground">Corretor:</span>
+          <div className="flex flex-wrap gap-1.5">
+            <button
+              onClick={() => setAgentFilter('all')}
+              className={cn(
+                'text-xs px-2.5 py-1 rounded-full border font-medium transition-colors',
+                agentFilter === 'all'
+                  ? 'bg-primary text-primary-foreground border-primary'
+                  : 'border-border text-muted-foreground hover:border-border-strong hover:text-foreground',
+              )}
+            >
+              Todos
+            </button>
+            {orgProfiles.map((p) => (
+              <button
+                key={p.id}
+                onClick={() => setAgentFilter(agentFilter === p.id ? 'all' : p.id)}
+                className={cn(
+                  'text-xs px-2.5 py-1 rounded-full border font-medium transition-colors',
+                  agentFilter === p.id
+                    ? 'bg-primary text-primary-foreground border-primary'
+                    : 'border-border text-muted-foreground hover:border-border-strong hover:text-foreground',
+                )}
+              >
+                {p.name ?? p.email ?? p.id.slice(0, 8)}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* New appointment form */}
       {showForm && (
         <Card className="overflow-hidden">
           <div className="px-5 pt-5 pb-3 border-b border-border">
@@ -186,6 +285,12 @@ export function Agendamentos() {
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
           {Array.from({ length: 4 }).map((_, i) => <SkeletonCard key={i} />)}
         </div>
+      ) : view !== 'list' ? (
+        <CalendarView
+          appointments={filteredAppointments}
+          view={view}
+          onDateClick={openFormForDate}
+        />
       ) : (
         <>
           <section className="space-y-3">

@@ -4,7 +4,7 @@ import type { Appointment } from '../types/database'
 import { useProfile } from './useProfile'
 
 export type AppointmentWithLead = Appointment & {
-  leads: { name: string | null; phone: string } | null
+  leads: { name: string | null; phone: string; assigned_to: string | null } | null
   properties: { title: string; location: string } | null
 }
 
@@ -28,7 +28,7 @@ export function useAppointments() {
     setLoading(true)
     const { data, error: qErr } = await supabase
       .from('appointments')
-      .select('*, leads(name, phone), properties(title, location)')
+      .select('*, leads(name, phone, assigned_to), properties(title, location)')
       .eq('organization_id', orgId)
       .order('scheduled_at', { ascending: true })
     if (qErr) {
