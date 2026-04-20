@@ -56,15 +56,39 @@ export function useAppointments() {
     notes: string | null
   }) {
     if (!orgId) return { message: 'Usuário sem organização' } as { message: string }
-    const { error } = await supabase.from('appointments').insert({
-      lead_id: input.lead_id,
-      property_id: input.property_id,
-      scheduled_at: input.scheduled_at,
-      notes: input.notes,
-      status: 'agendado',
-      organization_id: orgId,
-    })
-    if (!error) fetchAppointments()
+    const { data: inserted, error } = await supabase
+      .from('appointments')
+      .insert({
+        lead_id: input.lead_id,
+        property_id: input.property_id,
+        scheduled_at: input.scheduled_at,
+        notes: input.notes,
+        status: 'agendado',
+        organization_id: orgId,
+      })
+      .select('id')
+      .single()
+    if (!error) {
+      fetchAppointments()
+      // Fire-and-forget Google Calendar sync (no token needed client-side)
+      if (inserted?.id) {
+        supabase.auth.getSession().then(({ data: { session } }) => {
+          if (!session) return
+          fetch(
+            `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/sync-appointment-gcal`,
+            {
+              method: 'POST',
+              headers: {
+                Authorization: `Bearer ${session.access_token}`,
+                apikey: import.meta.env.VITE_SUPABASE_ANON_KEY as string,
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({ appointment_id: inserted.id }),
+            },
+          ).catch(() => { /* non-critical */ })
+        })
+      }
+    }
     return error
   }
 
