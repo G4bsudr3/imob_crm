@@ -75,6 +75,7 @@ export function LeadDetail({ lead, onClose, onSaved }: Props) {
   const [form, setForm] = useState({
     name: lead.name ?? '',
     phone: lead.phone ?? '',
+    email: lead.email ?? '',
     location_interest: lead.location_interest ?? '',
     property_type: lead.property_type ?? '',
     bedrooms_needed: lead.bedrooms_needed?.toString() ?? '',
@@ -195,6 +196,7 @@ export function LeadDetail({ lead, onClose, onSaved }: Props) {
     const { error } = await supabase.from('leads').update({
       name: form.name || null,
       phone: form.phone,
+      email: form.email.trim() || null,
       location_interest: form.location_interest || null,
       property_type: form.property_type || null,
       bedrooms_needed: form.bedrooms_needed ? parseInt(form.bedrooms_needed) : null,
@@ -586,6 +588,9 @@ export function LeadDetail({ lead, onClose, onSaved }: Props) {
                 </Field>
                 <Field label="Telefone *">
                   <Input value={form.phone} onChange={(e) => setForm((f) => ({ ...f, phone: e.target.value }))} />
+                </Field>
+                <Field label="Email" className="col-span-2" hint="Usado para convite de agendamento no Google Calendar">
+                  <Input type="email" value={form.email} onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))} placeholder="ex: joao@email.com" />
                 </Field>
                 <Field label="Tipo de imóvel">
                   <Input value={form.property_type} onChange={(e) => setForm((f) => ({ ...f, property_type: e.target.value }))} placeholder="apartamento, casa..." />

@@ -28,6 +28,7 @@ export function LeadCreateDialog({ onClose, onCreated }: Props) {
   const [form, setForm] = useState({
     name: '',
     phone: '',
+    email: '',
     property_type: '',
     location_interest: '',
     bedrooms_needed: '',
@@ -87,6 +88,7 @@ export function LeadCreateDialog({ onClose, onCreated }: Props) {
       organization_id: profile.organization_id,
       phone: phoneDigits,
       name: form.name.trim() || null,
+      email: form.email.trim() || null,
       property_type: form.property_type || null,
       location_interest: form.location_interest.trim() || null,
       bedrooms_needed: form.bedrooms_needed ? Number(form.bedrooms_needed) : null,
@@ -159,6 +161,15 @@ export function LeadCreateDialog({ onClose, onCreated }: Props) {
               )}
             </Field>
           </div>
+
+          <Field label="Email" hint="Opcional — para convite no Google Calendar">
+            <Input
+              type="email"
+              value={form.email}
+              onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))}
+              placeholder="Ex: joao@email.com"
+            />
+          </Field>
 
           <Field label="Status inicial">
             <Select
