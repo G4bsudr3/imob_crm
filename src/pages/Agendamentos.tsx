@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Calendar, LayoutList, MapPin, User, Plus, FileText, CalendarDays } from 'lucide-react'
+import { Calendar, LayoutList, MapPin, User, Plus, FileText, CalendarDays, Pencil, Check, X } from 'lucide-react'
 import { useAppointments } from '../hooks/useAppointments'
 import { useProfile } from '../hooks/useProfile'
 import { supabase } from '../lib/supabase'
@@ -23,7 +23,7 @@ type ViewMode = 'list' | 'month' | 'week'
 type OrgProfile = { id: string; name: string | null; email: string | null }
 
 export function Agendamentos() {
-  const { appointments, loading, updateStatus, createAppointment } = useAppointments()
+  const { appointments, loading, updateStatus, reschedule, createAppointment } = useAppointments()
   const { profile } = useProfile()
   const toast = useToast()
 
@@ -110,6 +110,26 @@ export function Agendamentos() {
   ]
 
   function AppointmentCard({ appt }: { appt: typeof appointments[0] }) {
+    const [editingTime, setEditingTime] = useState(false)
+    const [newTime, setNewTime] = useState('')
+    const [savingTime, setSavingTime] = useState(false)
+
+    function startEdit() {
+      const d = new Date(appt.scheduled_at)
+      const local = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}T${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`
+      setNewTime(local)
+      setEditingTime(true)
+    }
+
+    async function saveTime() {
+      if (!newTime) return
+      setSavingTime(true)
+      const error = await reschedule(appt.id, new Date(newTime).toISOString())
+      setSavingTime(false)
+      if (error) toast.error('Erro ao reagendar', error.message)
+      else { toast.success('Horário atualizado'); setEditingTime(false) }
+    }
+
     return (
       <Card className="p-5 hover:border-border-strong transition-colors">
         <div className="flex items-start justify-between gap-3">
@@ -118,7 +138,31 @@ export function Agendamentos() {
               <Calendar size={15} />
             </div>
             <div className="min-w-0 space-y-1">
-              <p className="text-sm font-semibold tabular tracking-tight">{formatDate(appt.scheduled_at)}</p>
+              {editingTime ? (
+                <div className="flex items-center gap-1.5">
+                  <input
+                    type="datetime-local"
+                    value={newTime}
+                    onChange={(e) => setNewTime(e.target.value)}
+                    className="text-xs border border-border rounded-md px-2 py-1 bg-background focus:outline-none focus:ring-1 focus:ring-primary"
+                  />
+                  <button onClick={saveTime} disabled={savingTime} className="p-1 text-success hover:opacity-80">
+                    <Check size={14} />
+                  </button>
+                  <button onClick={() => setEditingTime(false)} className="p-1 text-muted-foreground hover:opacity-80">
+                    <X size={14} />
+                  </button>
+                </div>
+              ) : (
+                <div className="flex items-center gap-1.5">
+                  <p className="text-sm font-semibold tabular tracking-tight">{formatDate(appt.scheduled_at)}</p>
+                  {appt.status !== 'cancelado' && appt.status !== 'realizado' && (
+                    <button onClick={startEdit} className="text-muted-foreground hover:text-foreground transition-colors">
+                      <Pencil size={11} />
+                    </button>
+                  )}
+                </div>
+              )}
               <p className="text-sm text-foreground flex items-center gap-1.5 truncate">
                 <User size={12} className="text-muted-foreground shrink-0" />
                 <span className="truncate">{appt.leads?.name ?? 'Sem nome'}</span>

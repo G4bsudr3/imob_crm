@@ -45,8 +45,26 @@ export function useAppointments() {
     const prev = appointments
     setAppointments((curr) => curr.map((a) => (a.id === id ? { ...a, status } : a)))
     const { error } = await supabase.from('appointments').update({ status }).eq('id', id)
-    if (error) setAppointments(prev)
+    if (error) { setAppointments(prev); return error }
+    // Cancel → delete GCal event
+    if (status === 'cancelado') {
+      supabase.functions
+        .invoke('sync-appointment-gcal', { body: { appointment_id: id, action: 'delete' } })
+        .catch(() => {})
+    }
     return error
+  }
+
+  async function reschedule(id: string, scheduledAt: string) {
+    const prev = appointments
+    setAppointments((curr) => curr.map((a) => (a.id === id ? { ...a, scheduled_at: scheduledAt } : a)))
+    const { error } = await supabase.from('appointments').update({ scheduled_at: scheduledAt }).eq('id', id)
+    if (error) { setAppointments(prev); return error }
+    // Patch GCal event with new time
+    supabase.functions
+      .invoke('sync-appointment-gcal', { body: { appointment_id: id, action: 'patch' } })
+      .catch(() => {})
+    return null
   }
 
   async function createAppointment(input: {
@@ -116,5 +134,5 @@ export function useAppointments() {
     }
   }, [orgId, fetchAppointments])
 
-  return { appointments, loading, error, refetch: fetchAppointments, updateStatus, createAppointment }
+  return { appointments, loading, error, refetch: fetchAppointments, updateStatus, reschedule, createAppointment }
 }
