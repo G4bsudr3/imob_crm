@@ -87,7 +87,7 @@ export function LeadDetail({ lead, onClose, onSaved }: Props) {
   const [properties, setProperties] = useState<Array<{ id: string; title: string }>>([])
   const [savingDeal, setSavingDeal] = useState(false)
   const [compatProps, setCompatProps] = useState<CompatProp[]>([])
-  const [loadingCompatProps, setLoadingCompatProps] = useState(false)
+  const [loadingCompatProps, setLoadingCompatProps] = useState(true)
   const [compatOpen, setCompatOpen] = useState(true)
 
   // Sincroniza com updates do lead via realtime (pai reabre/rehidrata via useLeads).
@@ -240,12 +240,13 @@ export function LeadDetail({ lead, onClose, onSaved }: Props) {
     const beds = form.bedrooms_needed ? parseInt(form.bedrooms_needed) : null
     const timer = setTimeout(async () => {
       setLoadingCompatProps(true)
-      const { data } = await supabase
+      const { data, error: propsErr } = await supabase
         .from('properties')
         .select('id, title, type, price, rent_price, bedrooms, location, neighborhood, city')
         .eq('organization_id', orgId)
         .eq('listing_status', 'available')
         .limit(50)
+      if (propsErr) { console.error('[compatProps]', propsErr); setLoadingCompatProps(false); return }
       const scored = (data ?? []).map((p) => {
         const { score, label, color } = scoreLeadPropMatch(
           { property_type: form.property_type || null, budget_max: budget, bedrooms_needed: beds, location_interest: form.location_interest || null },

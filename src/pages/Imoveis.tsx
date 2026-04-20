@@ -314,7 +314,7 @@ export function Imoveis() {
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const [compatLeads, setCompatLeads] = useState<CompatLead[]>([])
-  const [loadingCompatLeads, setLoadingCompatLeads] = useState(false)
+  const [loadingCompatLeads, setLoadingCompatLeads] = useState(true)
 
   const isEditing = typeof mode === 'object'
   const editingId = isEditing ? mode.edit : null
@@ -482,12 +482,14 @@ export function Imoveis() {
     const propertyBedrooms = parseInt(form.bedrooms) || 0
     const timer = setTimeout(async () => {
       setLoadingCompatLeads(true)
-      const { data } = await supabase
+      const { data, error: leadsErr } = await supabase
         .from('leads')
         .select('id, name, phone, status, budget_max, bedrooms_needed, location_interest, property_type')
         .eq('organization_id', orgId)
-        .not('status', 'in', '("descartado","convertido")')
+        .neq('status', 'descartado')
+        .neq('status', 'convertido')
         .limit(50)
+      if (leadsErr) { console.error('[compatLeads]', leadsErr); setLoadingCompatLeads(false); return }
       const scored = (data ?? []).map((lead) => {
         const { score, label, color } = scoreLeadPropMatch(
           { property_type: lead.property_type, budget_max: lead.budget_max, bedrooms_needed: lead.bedrooms_needed, location_interest: lead.location_interest },
